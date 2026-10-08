@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Excel の Git textconv をユーザー全体に設定する (Python 3.9 以降)。"""
+"""Excel の差分表示と部分ステージをユーザー全体に設定する (Python 3.9 以降)。"""
 
 import argparse
 import hashlib
@@ -76,13 +76,16 @@ def attributes_file():
 
 def dependency_versions(python):
     result = subprocess.run(
-        [str(python), "-c", "import openpyxl, xlrd; print(openpyxl.__version__); print(xlrd.__version__)"],
+        [str(python), "-B", "-c",
+         "import openpyxl, xlrd, lxml.etree; "
+         "print(openpyxl.__version__); print(xlrd.__version__); "
+         "print(lxml.__version__)"],
         capture_output=True,
         text=True,
         encoding="utf-8",
     )
     if result.returncode != 0:
-        raise RuntimeError("Excel 変換用の依存関係を確認できません: " + result.stderr.strip())
+        raise RuntimeError("Excel 用の依存関係を確認できません: " + result.stderr.strip())
     return result.stdout.strip()
 
 
@@ -91,6 +94,15 @@ def converter_path(install_directory, source, requirements, versions):
     # converter and library versions so reinstalls cannot reuse stale text.
     digest = hashlib.sha256(source + b"\0" + requirements + b"\0" + versions.encode("utf-8"))
     return install_directory / ("excel-textconv-" + digest.hexdigest()[:16] + ".py")
+
+
+def stage_path(install_directory, source, module, requirements, versions):
+    # Keep the entry point and its imported module in one immutable build so a
+    # running selector cannot accidentally import a different installed version.
+    digest = hashlib.sha256(
+        b"\0".join((source, module, requirements, versions.encode("utf-8")))
+    )
+    return install_directory / ("excel-stage-" + digest.hexdigest()[:16]) / "excel-stage.py"
 
 
 def cache_directory(converter):
@@ -103,6 +115,12 @@ def textconv_command(python, converter):
     # forward slashes, keeping the venv Python path (not its symlink target).
     parts = [python, converter, "--cache-dir", cache_directory(converter)]
     return " ".join(shlex.quote(part if isinstance(part, str) else part.as_posix()) for part in parts)
+
+
+def stage_alias(python, helper):
+    # Git shell aliases append the user's arguments, including the -- path
+    # separator. POSIX quoting works with Git for Windows' bundled shell too.
+    return "!" + " ".join(shlex.quote(path.as_posix()) for path in (python, helper))
 
 
 def registered_converter(command):
@@ -123,9 +141,13 @@ def remove_stale_caches(converter):
             shutil.rmtree(directory, ignore_errors=True)
 
 
-def verify(converter, source, attributes, expected):
+def verify(converter, source, attributes, expected, helper, helper_source, module_source):
     if not converter.is_file() or converter.read_bytes() != source:
         raise RuntimeError("変換スクリプトが未設定か更新されています。セットアップを再実行してください。")
+    module = helper.with_name("excel_stage_ooxml.py")
+    if (not helper.is_file() or helper.read_bytes() != helper_source
+            or not module.is_file() or module.read_bytes() != module_source):
+        raise RuntimeError("Excel 部分ステージのスクリプトが未設定か更新されています。セットアップを再実行してください。")
     for key, value in expected.items():
         values = git_values(key)
         if not values or values[-1] != value:
@@ -144,7 +166,7 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", type=Path,
-                        help="仮想環境と変換スクリプトの保存先 (同期対象リポジトリの外)")
+                        help="仮想環境と Excel 用スクリプトの保存先 (同期対象リポジトリの外)")
     parser.add_argument("--check", action="store_true", help="設定を変更せず、インストール状態を確認する")
     args = parser.parse_args()
     try:
@@ -160,6 +182,8 @@ def main():
             raise RuntimeError("--install-dir は同期対象リポジトリの外を指定してください。")
         source_path = root / "scripts/excel-textconv.py"
         source = source_path.read_bytes()
+        helper_source = (root / "scripts/excel-stage.py").read_bytes()
+        module_source = (root / "scripts/excel_stage_ooxml.py").read_bytes()
         requirements_path = root / "requirements-excel-diff.txt"
         requirements = requirements_path.read_bytes()
         attributes = attributes_file()
@@ -168,17 +192,20 @@ def main():
         python = directory / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if args.check:
             if not python.is_file():
-                raise RuntimeError("Excel 変換用の仮想環境がありません。セットアップを実行してください。")
+                raise RuntimeError("Excel 用の仮想環境がありません。セットアップを実行してください。")
         else:
-            print("Excel 変換用の仮想環境と依存関係を準備しています。", flush=True)
+            print("Excel 用の仮想環境と依存関係を準備しています。", flush=True)
             venv.EnvBuilder(with_pip=True).create(directory / "venv")
             subprocess.run(
                 [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements_path)],
                 check=True,
             )
-        converter = converter_path(directory, source, requirements, dependency_versions(python))
+        versions = dependency_versions(python)
+        converter = converter_path(directory, source, requirements, versions)
+        helper = stage_path(directory, helper_source, module_source, requirements, versions)
         expected = {
             "diff.excel.textconv": textconv_command(python, converter),
+            "alias.excel-stage": stage_alias(python, helper),
             "diff.excel.binary": "true",
             # The converter keeps its own cache. Git's cache would store the
             # temporary "converting" text of a large workbook for good.
@@ -190,6 +217,9 @@ def main():
             expected["core.attributesFile"] = attributes.as_posix()
         if not args.check:
             converter.write_bytes(source)
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_bytes(helper_source)
+            helper.with_name("excel_stage_ooxml.py").write_bytes(module_source)
             remove_stale_caches(converter)
             if not existing_attributes.rstrip(b"\r\n").endswith(ATTRIBUTE_BLOCK.rstrip(b"\n")):
                 attributes.parent.mkdir(parents=True, exist_ok=True)
@@ -200,9 +230,11 @@ def main():
                     output.write(ATTRIBUTE_BLOCK)
             for key, value in expected.items():
                 subprocess.run(["git", "config", "--global", "--replace-all", key, value], check=True)
-        verify(converter, source, attributes, expected)
-        print("Excel 差分の設定を確認しました。" if args.check else "Excel 差分をグローバルに設定しました。")
+        verify(converter, source, attributes, expected, helper, helper_source, module_source)
+        print("Excel 差分と部分ステージの設定を確認しました。" if args.check
+              else "Excel 差分と部分ステージをグローバルに設定しました。")
         print("変換スクリプト: " + str(converter))
+        print("部分ステージ: " + str(helper))
         print("attributes: " + str(attributes))
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as error:
