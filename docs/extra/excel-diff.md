@@ -1,6 +1,10 @@
-# Excel 差分の仕様と制限
+# Excel の差分表示の注意点
 
-Excel の仕様・対応形式・制限はこのリポジトリで管理する。操作は集約先を参照する。
+[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-の-excel-差分表示を導入する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-の-excel-差分表示を導入する)・[検証記録](../verification/readme.md)・[表示する内容と自動検証](../excel-diff.md)
+
+## 注意点
+
+- プロジェクトの `.gitattributes` や `.git/info/attributes` は、ユーザーの属性ファイルより優先する
 
 変換に時間がかかっても、lazygit の操作は止まりません。1 回の変換が 2 秒以内に終わらない場合、変換スクリプトはすぐに次のような仮の内容を返し、残りの変換を裏で続けます。シートを展開した大きさから 2 秒では終わらないと分かるブック(展開後 16 MB 超。検証に使った表では約 30 万セル)は、待たずにすぐ返します。
 

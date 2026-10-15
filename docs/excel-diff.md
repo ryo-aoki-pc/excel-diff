@@ -1,10 +1,6 @@
-# Excel の差分表示と部分ステージ
+# Excel の差分表示の仕様と検査
 
-Windows 11・AlmaLinux 10 の導入・利用・更新手順は setup-notes の2冊に集約した。
-
-## 導入
-
-[AlmaLinux 10](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-の-excel-差分表示を導入する) / [Windows 11](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-の-excel-差分表示を導入する)
+導入と使い方の手順は setup-notes の[lazygit の Excel 差分表示を導入する](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-の-excel-差分表示を導入する)（Windows 11 は[同名の項](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-の-excel-差分表示を導入する)）と、その後ろの項にある。この文書には、表示する内容・自動検証・macOS の導入を置く。対応条件と制限は[注意点](extra/excel-diff.md)。
 
 ## 表示する内容
 
@@ -27,18 +23,6 @@ Windows 11・AlmaLinux 10 の導入・利用・更新手順は setup-notes の2�
 
 空のセルは省略します。文字列中の改行やタブは `\n` / `\t` として表示し、1 セルを 1 行で比較します。書式・色・図・マクロのコードは比較しません。`.xlsb` とパスワードで暗号化されたブックは対象外です。
 
-## 大きいブックの表示
-
-[AlmaLinux 10](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で大きな-excel-の変換を待つ) / [Windows 11](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で大きな-excel-の変換を待つ)
-
-## 確認と操作
-
-[AlmaLinux 10](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-excel-の差分を確かめる) / [Windows 11](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-excel-の差分を確かめる)
-
-## Excel の部分ステージ
-
-[AlmaLinux 10](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-excel-のセル変更を部分ステージする) / [Windows 11](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-excel-のセル変更を部分ステージする)
-
 ## 自動検証
 
 自動検証は、このリポジトリのフォルダーで導入した仮想環境の Python を使って実行できます(既定の置き場所の例)。
@@ -54,12 +38,6 @@ Windows(PowerShell):
 ```powershell
 & "$env:LOCALAPPDATA\lazygit-excel-diff\venv\Scripts\python.exe" -B -m unittest discover -s tests -v
 ```
-
-## 仕様と制限
-
-プロジェクトの `.gitattributes` や `.git/info/attributes` はユーザー属性ファイルより優先します。
-
-[対応条件・制限・大きいブックの処理](extra/excel-diff.md)
 
 ## macOS の導入
 
