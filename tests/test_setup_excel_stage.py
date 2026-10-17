@@ -69,12 +69,14 @@ class SetupExcelStageTests(unittest.TestCase):
         return RUN(["git", *args], cwd=self.checkout, env=self.env,
                    capture_output=True, encoding="utf-8", check=True)
 
-    def run_setup(self, *, check=False, explicit_directory=True, versions=VERSIONS, env=None):
+    def run_setup(self, *, check=False, uninstall=False, explicit_directory=True, versions=VERSIONS, env=None):
         arguments = ["setup-excel-diff.py"]
         if explicit_directory:
             arguments += ["--install-dir", str(self.install)]
         if check:
             arguments.append("--check")
+        if uninstall:
+            arguments.append("--uninstall")
 
         def run(command, *args, **kwargs):
             if command[1:4] == ["-m", "pip", "install"]:
@@ -129,11 +131,18 @@ class SetupExcelStageTests(unittest.TestCase):
                          self.original_attributes + b"\n" + self.setup.ATTRIBUTE_BLOCK)
         alias = self.run_git("config", "--global", "--get-all", "alias.excel-stage").stdout.splitlines()
         self.assertEqual(len(alias), 1)
+        merge_alias = self.run_git("config", "--global", "--get-all", "alias.excel-merge").stdout.splitlines()
+        self.assertEqual(len(merge_alias), 1)
         self.assertEqual(len(list(self.install.glob("excel-stage-*"))), 1)
         filename = "-売上 表 O'Brien $dollar.xlsx"
         result = self.run_git("excel-stage", "--", filename)
         self.assertEqual(json.loads(result.stdout),
                          {"arguments": ["--", filename], "module": "installed module"})
+        source = "元の 表 O'Brien $dollar.xlsm"
+        merged = self.run_git("excel-merge", "--", filename, source)
+        self.assertEqual(json.loads(merged.stdout),
+                         {"arguments": ["--merge", "--", filename, source],
+                          "module": "installed module"})
         self.assertEqual(self.run_git("config", "--global", "--get", "diff.excel.binary").stdout.strip(), "true")
         self.assertEqual(self.run_git("config", "--global", "--get", "diff.excel.cachetextconv").stdout.strip(), "false")
 
@@ -200,6 +209,245 @@ class SetupExcelStageTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("lxml", error)
         self.assertEqual(self.snapshot(), before)
+
+    def test_check_rejects_changed_or_missing_merge_alias_without_modifying_config(self):
+        for value in ("!printf changed", None):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_setup()[0], 0)
+                if value is None:
+                    self.run_git("config", "--global", "--unset-all", "alias.excel-merge")
+                else:
+                    self.run_git("config", "--global", "alias.excel-merge", value)
+                before = self.snapshot()
+                result, _, error = self.run_setup(check=True)
+                self.assertEqual(result, 1)
+                self.assertIn("alias.excel-merge", error)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_default_install_directory_is_named_excel_diff(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for platform in ("win32", "linux", "darwin"):
+                with self.subTest(platform=platform), mock.patch.object(self.setup.sys, "platform", platform):
+                    self.assertEqual(self.setup.default_install_directory().name, "excel-diff")
+
+    def test_uninstall_restores_attributes_and_settings_and_can_repeat(self):
+        original = b"\xef\xbb\xbf# Existing attributes\r\n*.csv diff=csv\n*.txt text\r\n"
+        self.attributes.write_bytes(original)
+        self.run_git("config", "--global", "core.attributesFile", self.attributes.as_posix())
+        self.run_git("config", "--global", "alias.keep", "status")
+        self.assertEqual(self.run_setup()[0], 0)
+        suffix = b"# User rules after the installed block\r\n*.custom diff=custom\r\n"
+        with self.attributes.open("ab") as output:
+            output.write(suffix)
+        pip_count = len(self.pip_calls)
+        changed_env = dict(self.env, XDG_DATA_HOME=str(self.directory / "elsewhere"))
+        result, output, error = self.run_setup(
+            uninstall=True, explicit_directory=False, env=changed_env,
+            versions=RuntimeError("dependencies must not be checked"),
+        )
+        self.assertEqual(result, 0, error)
+        self.assertIn("削除した導入先", output)
+        for key in self.setup.UNINSTALL_KEYS:
+            query = RUN(["git", "config", "--global", "--get-all", key],
+                        cwd=self.checkout, env=self.env, capture_output=True)
+            self.assertEqual(query.returncode, 1, key)
+            self.assertIn(key, output)
+        self.assertEqual(self.attributes.read_bytes(), original + suffix)
+        self.assertFalse(self.install.exists())
+        self.assertEqual(self.run_git("config", "--global", "--get", "core.attributesFile").stdout.strip(),
+                         self.attributes.as_posix())
+        self.assertEqual(self.run_git("config", "--global", "--get", "alias.keep").stdout.strip(), "status")
+        self.assertEqual(len(self.pip_calls), pip_count)
+        before = self.snapshot()
+        result, output, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 0, error)
+        self.assertIn("消すものがありません", output)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_leaves_attributes_unchanged_without_markers(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        original = b"\xef\xbb\xbf# unrelated\r\n*.csv diff=csv"
+        self.attributes.write_bytes(original)
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 0, error)
+        self.assertEqual(self.attributes.read_bytes(), original)
+        self.assertFalse(self.install.exists())
+
+    def test_uninstall_preserves_bom_when_managed_block_is_first(self):
+        self.attributes.write_bytes(b"")
+        self.assertEqual(self.run_setup()[0], 0)
+        self.attributes.write_bytes(b"\xef\xbb\xbf" + self.attributes.read_bytes() + b"*.csv diff=csv\r\n")
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 0, error)
+        self.assertEqual(self.attributes.read_bytes(), b"\xef\xbb\xbf*.csv diff=csv\r\n")
+
+    def test_uninstall_rejects_broken_markers_before_any_change(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        begin = self.setup.ATTRIBUTE_BLOCK.splitlines(keepends=True)[0]
+        end = self.setup.ATTRIBUTE_BLOCK.splitlines(keepends=True)[-1]
+        cases = {
+            "begin_only": begin + b"*.csv diff=csv\r\n",
+            "end_only": end,
+            "reversed": end + begin,
+            "multiple_blocks": self.setup.ATTRIBUTE_BLOCK * 2,
+            "multiple_begins": begin + self.setup.ATTRIBUTE_BLOCK,
+            "multiple_ends": self.setup.ATTRIBUTE_BLOCK + end,
+        }
+        for name, content in cases.items():
+            with self.subTest(name=name):
+                self.attributes.write_bytes(b"\xef\xbb\xbf" + content)
+                before = self.snapshot()
+                result, _, error = self.run_setup(uninstall=True)
+                self.assertEqual(result, 1)
+                self.assertIn("目印", error)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_refuses_unknown_directory_without_changing_anything(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        (self.install / "unrelated.txt").write_bytes(b"keep this file")
+        before = self.snapshot()
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 1)
+        self.assertIn("作った形", error)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_refuses_directory_without_installed_scripts(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        for entry in self.install.glob("excel-textconv-*.py"):
+            entry.unlink()
+        for entry in self.install.glob("excel-stage-*"):
+            shutil.rmtree(entry)
+        before = self.snapshot()
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 1)
+        self.assertIn("作った形", error)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_refuses_directory_inside_any_repository(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        RUN(["git", "init", "-q", str(self.directory)], env=self.env, check=True)
+        before = self.snapshot()
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 1)
+        self.assertIn("リポジトリ", error)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_refuses_linked_worktree_and_separate_git_directory(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        repository = self.directory / "repository"
+        RUN(["git", "init", "-q", str(repository)], env=self.env, check=True)
+        RUN(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "--allow-empty", "-q", "-m", "fixture"], env=self.env, check=True)
+        linked = self.directory / "linked-worktree"
+        RUN(["git", "-C", str(repository), "worktree", "add", "-q", "-b", "linked-test", str(linked)],
+            env=self.env, check=True)
+        separate = self.directory / "separate-worktree"
+        metadata = self.directory / "separate-metadata"
+        RUN(["git", "init", "-q", "--separate-git-dir", str(metadata), str(separate)],
+            env=self.env, check=True)
+        for location in (linked, separate):
+            with self.subTest(location=location.name):
+                previous = self.install
+                self.install = previous.rename(location / "installed")
+                self.assertTrue((location / ".git").is_file())
+                before = self.snapshot()
+                result, _, error = self.run_setup(uninstall=True)
+                self.assertEqual(result, 1)
+                self.assertIn("リポジトリ", error)
+                self.assertEqual(self.snapshot(), before)
+                self.install = self.install.rename(previous)
+
+    def test_uninstall_refuses_worktree_defined_only_by_git_environment(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        metadata = self.directory / "custom-metadata"
+        RUN(["git", "init", "-q", "--bare", str(metadata)], env=self.env, check=True)
+        location = self.directory / "custom-worktree"
+        location.mkdir()
+        self.install = self.install.rename(location / "installed")
+        self.assertFalse((location / ".git").exists())
+        RUN(["git", "--git-dir", str(metadata), "config", "core.bare", "false"], env=self.env, check=True)
+        RUN(["git", "--git-dir", str(metadata), "config", "core.worktree", str(location)],
+            env=self.env, check=True)
+        for explicit_worktree in (False, True):
+            with self.subTest(explicit_worktree=explicit_worktree):
+                environment = dict(self.env, GIT_DIR=str(metadata))
+                if explicit_worktree:
+                    environment["GIT_WORK_TREE"] = str(location)
+                before = self.snapshot()
+                result, _, error = self.run_setup(uninstall=True, env=environment)
+                self.assertEqual(result, 1)
+                self.assertIn("リポジトリ", error)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_refuses_missing_venv_without_changing_anything(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        shutil.rmtree(self.install / "venv")
+        before = self.snapshot()
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 1)
+        self.assertIn("作った形", error)
+        self.assertEqual(self.snapshot(), before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions only")
+    def test_uninstall_refuses_junction_before_resolving_its_target(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        target = self.install.rename(self.directory / "real-install")
+        created = RUN(["cmd", "/c", "mklink", "/J", str(self.install), str(target)],
+                      env=self.env, capture_output=True)
+        if created.returncode != 0:
+            self.skipTest("Directory junction creation is unavailable")
+        before = self.snapshot()
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 1)
+        self.assertIn("リンク", error)
+        self.assertEqual(self.snapshot(), before)
+        self.assertTrue(target.is_dir())
+
+    def test_uninstall_refuses_included_settings_before_any_change(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        included = self.directory / "included.gitconfig"
+        included.write_bytes(b'[alias]\n\texcel-merge = "!keep included command"\n')
+        self.run_git("config", "--global", "include.path", included.as_posix())
+        before = self.snapshot()
+        included_before = (included.stat().st_mtime_ns, included.read_bytes())
+        result, _, error = self.run_setup(uninstall=True)
+        self.assertEqual(result, 1)
+        self.assertIn("include", error)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((included.stat().st_mtime_ns, included.read_bytes()), included_before)
+
+    def test_uninstall_stops_before_any_change_on_preflight_permission_error(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        original_exists = Path.exists
+        original_read = Path.read_bytes
+        original_lstat = Path.lstat
+        for location in (self.attributes, self.install):
+            with self.subTest(location=location.name):
+                before = self.snapshot()
+
+                def exists(path):
+                    return False if path == location else original_exists(path)
+
+                def read_bytes(path):
+                    if path == location:
+                        raise PermissionError("preflight access denied")
+                    return original_read(path)
+
+                def lstat(path):
+                    if path == location:
+                        raise PermissionError("preflight access denied")
+                    return original_lstat(path)
+
+                with mock.patch.object(Path, "exists", exists), \
+                        mock.patch.object(Path, "read_bytes", read_bytes), \
+                        mock.patch.object(Path, "lstat", lstat):
+                    if location == self.install:
+                        with self.assertRaises(PermissionError):
+                            self.setup.validate_uninstall_directory(self.install, self.checkout)
+                    result, _, error = self.run_setup(uninstall=True)
+                self.assertEqual(result, 1)
+                self.assertIn("preflight access denied", error)
+                self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

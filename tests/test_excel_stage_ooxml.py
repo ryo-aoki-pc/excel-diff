@@ -552,13 +552,51 @@ class OoxmlStagingTests(unittest.TestCase):
         with self.assertRaisesRegex(OOXML.WorkbookError, "結合セル"):
             base.rebuild(base, {("1", "C1")})
 
+    def test_unsupported_reason_matches_rebuild_checks(self):
+        base = OOXML.Workbook(book_bytes())
+        self.assertIsNone(base.unsupported_reason(("1", "A1")))
+        self.assertIsNone(base.unsupported_reason(("1", "Z99")))
+
+        def groups(root):
+            formula = cell_node(root, "B2").find("{" + NS + "}f")
+            formula.set("t", "array")
+            formula.set("ref", "B2:C3")
+            group = etree.SubElement(root, "{" + NS + "}mergeCells")
+            etree.SubElement(group, "{" + NS + "}mergeCell", ref="D4:E4")
+
+        unsafe = OOXML.Workbook(edit_xml(base.data, "xl/worksheets/sheet1.xml", groups))
+        for coordinate, reason in (("B2", "数式"), ("C3", "数式の範囲"), ("E4", "結合セル")):
+            with self.subTest(coordinate=coordinate):
+                self.assertIn(reason, unsafe.unsupported_reason(("1", coordinate)))
+                with self.assertRaisesRegex(OOXML.WorkbookError, "セル単位で反映できません"):
+                    unsafe.rebuild(unsafe, {("1", coordinate)})
+        self.assertIsNone(unsafe.unsupported_reason(("1", "D4")))
+        with self.assertRaisesRegex(OOXML.WorkbookError, "未知のシート"):
+            unsafe.unsupported_reason(("missing", "A1"))
+
+    def test_defined_names_and_sheet_configuration_errors_name_the_difference(self):
+        base = OOXML.Workbook(book_bytes())
+
+        def define(root):
+            names = root.find("{" + NS + "}definedNames")
+            if names is None:
+                names = etree.SubElement(root, "{" + NS + "}definedNames")
+            etree.SubElement(names, "{" + NS + "}definedName", name="Amount").text = "'売上'!$B$1"
+
+        changed = OOXML.Workbook(edit_xml(base.data, "xl/workbook.xml", define))
+        with self.assertRaisesRegex(OOXML.WorkbookError, "名前定義"):
+            base.assert_compatible(changed)
+        changed = OOXML.Workbook(edit_book(base.data, lambda book: book.create_sheet("追加")))
+        with self.assertRaisesRegex(OOXML.WorkbookError, "シートの名前・順序"):
+            base.assert_compatible(changed)
+
     def test_structure_changes_and_malformed_selection_are_rejected(self):
         base = OOXML.Workbook(book_bytes())
         renamed = edit_book(base.data, lambda book: setattr(book["売上"], "title", "別名"))
-        with self.assertRaises(OOXML.WorkbookError):
+        with self.assertRaisesRegex(OOXML.WorkbookError, "シートの名前・順序・内部の参照"):
             base.assert_compatible(OOXML.Workbook(renamed))
         epoch = edit_xml(base.data, "xl/workbook.xml", lambda root: root.find("{" + NS + "}workbookPr").set("date1904", "1"))
-        with self.assertRaises(OOXML.WorkbookError):
+        with self.assertRaisesRegex(OOXML.WorkbookError, "日付基準"):
             base.assert_compatible(OOXML.Workbook(epoch))
         malformed = ('not JSON', '["A1",[],null]', '["A1","unknown",null]', '["A0","number","1"]', '["A1","boolean",1]', '["A1","number","NaN"]')
         for line in malformed:
@@ -580,7 +618,7 @@ class OoxmlStagingTests(unittest.TestCase):
         })
         base = OOXML.Workbook(original)
         changed_target = edit_xml(original, "xl/externalLinks/_rels/externalLink1.xml.rels", lambda root: root[0].set("Target", "different.xlsx"))
-        with self.assertRaises(OOXML.WorkbookError):
+        with self.assertRaisesRegex(OOXML.WorkbookError, "外部参照"):
             base.assert_compatible(OOXML.Workbook(changed_target))
 
         def cached_value(root):

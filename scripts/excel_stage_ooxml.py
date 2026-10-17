@@ -281,7 +281,7 @@ class Workbook:
                 self._parts = {info.filename: archive.read(info) for info in self._infos}
                 self._comment = archive.comment
             if any(path.startswith("_xmlsignatures/") for path in self._parts):
-                raise WorkbookError("電子署名付きの Excel は部分ステージできません")
+                raise WorkbookError("電子署名付きの Excel はセル単位で反映できません")
             self._load()
         except WorkbookError:
             raise
@@ -507,7 +507,7 @@ class Workbook:
                                 order.append(key)
                                 positions.append(position)
                             elif cell != expected(key):
-                                raise WorkbookError("部分ステージ後のセル検証に失敗しました。インデックスは更新していません")
+                                raise WorkbookError("作り直したブックの検証に失敗しました。書き込みは行っていません")
                         if unsafe:
                             self._unsafe[key] = unsafe
                     element.clear()
@@ -535,7 +535,10 @@ class Workbook:
 
     def assert_compatible(self, other):
         if self._structure != other._structure:
-            raise WorkbookError("シート構成・名前・日付基準・名前定義・外部参照が変わったブックは部分ステージできません")
+            labels = ("ブックの内部構成", "ブックの内部構成", "シートの名前・順序・内部の参照", "日付基準", "名前定義", "外部参照")
+            differences = list(dict.fromkeys(label for label, left, right in
+                                             zip(labels, self._structure, other._structure) if left != right))
+            raise WorkbookError("・".join(differences) + "が違うブックはセル単位で反映できません")
 
     def _sync_order(self):
         # cells remains a public dict. Rebuild the cache only if a caller has
@@ -585,18 +588,28 @@ class Workbook:
             lines[sheet.id] = output.getvalue()
         return lines
 
+    def unsupported_reason(self, key):
+        """Return the same reason used by rebuild, or None for an ordinary cell."""
+        identifier, coordinate = key
+        if identifier not in {sheet.id for sheet in self.sheets}:
+            raise WorkbookError("セル選択に未知のシートがあります")
+        coordinate_key(coordinate)
+        reason = self._unsafe.get(key)
+        if reason:
+            return reason
+        if any(_inside(coordinate, rectangle) for rectangle in self._ranges[identifier]):
+            return "配列・共有・データテーブル数式の範囲"
+        for rectangle in self._merges[identifier]:
+            if _inside(coordinate, rectangle) and coordinate_key(coordinate) != rectangle[0]:
+                return "結合セルの左上以外"
+        return None
+
     def _check_selected(self, selected):
         sheets = {sheet.id: sheet for sheet in self.sheets}
-        for identifier, coordinate in selected:
-            if identifier not in sheets:
-                raise WorkbookError("セル選択に未知のシートがあります")
-            coordinate_key(coordinate)
-            reason = self._unsafe.get((identifier, coordinate))
-            if reason or any(_inside(coordinate, rectangle) for rectangle in self._ranges[identifier]):
-                raise WorkbookError(sheets[identifier].name + "!" + coordinate + " は部分ステージできません: " + (reason or "配列・共有・データテーブル数式の範囲"))
-            for rectangle in self._merges[identifier]:
-                if _inside(coordinate, rectangle) and coordinate_key(coordinate) != rectangle[0]:
-                    raise WorkbookError("結合セルの左上以外は部分ステージできません: " + sheets[identifier].name + "!" + coordinate)
+        for key in selected:
+            reason = self.unsupported_reason(key)
+            if reason:
+                raise WorkbookError(sheets[key[0]].name + "!" + key[1] + " はセル単位で反映できません: " + reason)
 
     def rebuild(self, source, selected):
         self.assert_compatible(source)
@@ -642,7 +655,7 @@ class Workbook:
         return _serialize(tree, self._parts[sheet.path])
 
     def _validate_result(self, result, source, changed, updates, removed):
-        failure = "部分ステージ後のセル検証に失敗しました。インデックスは更新していません"
+        failure = "作り直したブックの検証に失敗しました。書き込みは行っていません"
         parts = {path: content for path, content in self._parts.items() if path not in removed}
         parts.update(updates)
         # Check the actual ZIP, including every untouched/removed part. Once its
