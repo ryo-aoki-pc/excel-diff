@@ -10,7 +10,7 @@
 
 ## このリポジトリは何か
 
-Excel のブックをセル単位のテキストにして Git の差分に表示し、選んだセル変更だけを部分ステージする道具。導入の表は [README.md](README.md)、仕様と検査・macOS の導入は [docs/reference/readme.md](docs/reference/readme.md)、注意点は [docs/extra/readme.md](docs/extra/readme.md)、検証記録は [docs/verification/readme.md](docs/verification/readme.md)。
+Excel のブックをセル単位のテキストにして Git の差分に表示し、選んだセル変更だけを部分ステージする道具。導入の表は [README.md](README.md)、仕様と検査・macOS の導入は [docs/reference/readme.md](docs/reference/readme.md)、注意点は [docs/extra/readme.md](docs/extra/readme.md)、検証記録は [非公開側の readme.md](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)。
 
 lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygit) にあり、`E` のキーが、このリポジトリの導入スクリプトで登録する `git excel-stage` を呼ぶ。
 
@@ -37,7 +37,6 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 - `.gitignore` — Python の実行時キャッシュとローカルの設定・同期マーカーを除く
 - `docs/reference/readme.md` — Excel の差分表示の仕様と検査・macOS の導入
 - `docs/extra/readme.md` — 注意点
-- `docs/verification/readme.md` — 検証記録
 
 ## テスト
 
@@ -51,7 +50,8 @@ python3 -B -m unittest discover -s tests -v
 ## 文書の置き場所
 
 - 導入・利用・更新の手順は正本に置き、README の「導入」の表から正本の項へ直接リンクする（手順書の先頭やカテゴリの見出しへはリンクしない）。執筆規則は setup-notes の `docs/dev/writing-rules.md`
-- `docs/extra/` はロールバックと注意点、`docs/reference/` は仕様・自動検証・macOS の導入、`docs/verification/` は検証記録（実施日・環境・結果・未確認事項）。テストのコマンドは上の「テスト」
+- `docs/extra/` はロールバックと注意点、`docs/reference/` は仕様・自動検証・macOS の導入。検証記録（実施日・環境・結果・未確認事項）は非公開の `ryo-aoki-pc/setup-notes-verification` の `repos/excel-diff/docs/verification/` に置く。テストのコマンドは上の「テスト」
+- 検証記録を書く・直すときは、`setup-notes-verification` を clone し、そちらへ Pull Request を作る
 - 文書を移す・分ける・まとめるときは、移した経緯と、旧ファイル名・旧見出しとの対応を文書に書かない（経緯は git の履歴と Pull Request の本文に残す）。リンクを今の場所へ直す。中身が新しい場所への案内だけになったファイルは消す
 - 検証していないことを「動く」と書かない
 - 残す検証記録の実施日・対象版・環境・出力・成功と失敗・未実施の範囲・記録したときの手順番号は書き換えない。再検証せずに検証範囲を広げない。記録の手順番号が今の手順と違い、本文を読むのに要るときだけ「記録の手順 | 今の手順」の表で結ぶ
