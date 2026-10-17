@@ -1,4 +1,4 @@
-# excel-diff の注意点
+# excel-diff の注意点とロールバック
 
 [手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・[検証記録](../verification/readme.md)・[表示する内容と自動検証](../reference/readme.md)
 
@@ -48,3 +48,169 @@ PowerShell の設定は、そのウィンドウで後から実行するコマン
 表示確認と部分ステージのために使うスクリプトは、Excel のマクロを実行せず、外部リンクの更新や数式の再計算も行いません。部分ステージしたブックには、次に Excel で開いたときに一度だけ再計算する指定(`fullCalcOnLoad`)を付けます。常に完全再計算する設定(`forceFullCalc`)は付けません。
 
 専用画面の一時リポジトリには `core.quotePath=false` を設定します。lazygit 0.66.0 と delta 0.20.1 では、日本語のシート名から作ったファイル名が Git の引用形式になると、ハンクを選んでも対象ファイルを照合できません。この設定で表示と選択を同じファイル名に揃えます。設定の適用先は一時リポジトリです。
+
+## 取り込みの注意点
+
+`git excel-merge` は、最初の引数のブックを上書きします。`.bak` は作りません。必要な控えは実行前に用意してください。書き込めば更新日時も変わります。取り込み元は準備時の写しを使い、元のファイルは変更しません。
+
+- 画面を開いた後に取り込み先が変わったり削除されたりした場合は、上書きせず止まります。画面を閉じて最初から選び直してください。
+- Excel などで取り込み先を開いている場合は閉じてください。Windows は読み書き用に開けないファイル、Linux は LibreOffice のロックファイルがあるファイルで止まります。シンボリックリンク、複数のハードリンクを持つ取り込み先、読み取り専用の取り込み先も対象外です。
+- 同期や共同編集のすべてを検出するものではありません。OneDrive などの共同編集中かどうかは検出しません。
+- 値と通常の数式だけを取り込みます。書式・画像・マクロ・テンプレート形式は取り込み先のものを保ちます。セル以外の変更を取り込む用途には使えません。
+- リッチテキスト、共有・配列数式などの範囲、結合セルの左上以外など、セル単位で反映できない違いは選べません。取り込み先・取り込み元の両方を調べ、端末に理由とセル番地を表示します。
+- 行・列の挿入、削除、移動そのものは反映しません。セル番地で比べるため、行・列をずらしたブックは多数の値の変更として見えます。
+- 選んだ文字列のふりがなは引き継ぎません。数式はその場で再計算せず、次に Excel で開くときの再計算を指定します。
+
+WinMerge では、取り込むセルの行を右から左へ行ごとにコピーしてください。手で値を打つ、見出しを変える、行を増減・並べ替える操作は照合で止まります。コピーした後は上書き保存（`Ctrl+S`）し、WinMerge の窓を閉じると取り込み先へ書き込みます。保存せずに閉じれば、画面上でコピーしていても取り込み先は変わりません。
+
+WinMerge の比較設定によっては、違いが画面に出ないことがあります。比較の無視設定やフィルターを確かめてください。WinMerge のバックアップ設定によっては、一時フォルダー以外にもセルの値を含むテキストの控えが残ることがあります。扱う値に応じて保存先を確かめてください。
+
+取り込みの準備と書き込みは、ブック全体の読み込み・検証が終わるまで待ちます。大きいブックでは時間とメモリが必要です。Windows 11 での例では、50 万セルのブックで、画面を開くまでの準備に約 6 秒、書き込みに約 11 秒かかり、WinMerge は約 1 秒で窓を開いて 208 MB ほど使いました([検証記録](../verification/readme.md#2-つのブックの取り込み2026-10-18))。
+
+ファイルは同じフォルダーの一時ファイルから置き換えます。元のモードと、Windows の `Zone.Identifier` は引き継ぎます。Windows の明示的な ACL、`Zone.Identifier` 以外の代替データストリームは引き継ぎません。
+
+## Windows 11 のロールバック
+
+excel-diff の Git 設定と導入先を外し、最後に clone を削除します。Git・Python・WinMerge・lazygit は削除しません。
+
+- 前提: [excel-diff を導入・更新する](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)で、自分のユーザーに導入している
+- 実行場所: Windows 11 の自分のユーザー、管理者ではない Windows PowerShell 5.1
+- 貼った後は、反転表示の「確認」から後ろの出力を箇条書きで確かめる
+
+> [!CAUTION]
+> この節の手順 3 は `%USERPROFILE%\excel-diff` を削除します。未コミット・未 push の変更は取り戻せません。手順 1 の確認と手順 2 の削除が成功してから進んでください。
+
+1. clone で、未コミット・未 push の変更が無いことを確認する。
+
+   ```powershell
+   & {
+       Set-Location -LiteralPath "$env:USERPROFILE\excel-diff" -ErrorAction Stop
+       git fetch --all --prune
+       if ($LASTEXITCODE -ne 0) { throw "中断: リモートを確認できませんでした" }
+       $excelDiffChanges = @(git status --porcelain=v1 --untracked-files=all)
+       if ($LASTEXITCODE -ne 0) { throw "中断: 作業ツリーを確認できませんでした" }
+       $excelDiffUnpushed = @(git log --oneline HEAD --branches --not --remotes)
+       if ($LASTEXITCODE -ne 0) { throw "中断: 未 push のコミットを確認できませんでした" }
+       "`n$([char]27)[7m 確認 $([char]27)[0m"
+       $excelDiffChanges
+       $excelDiffUnpushed
+       if ($excelDiffChanges.Count -gt 0 -or $excelDiffUnpushed.Count -gt 0) {
+           throw "中断: 未コミット・未 push の変更を保管してからやり直してください"
+       }
+       "未コミット・未 push の変更はありません"
+   }
+   ```
+
+   - 「未コミット・未 push の変更はありません」と出ること
+   - 変更やエラーが出た場合は、手順 2・3 へ進まず、必要なファイルを保管し、コミット・push の扱いを決めてからやり直す
+   - **次の手順は、この確認が成功してから貼る**
+
+1. clone で、導入スクリプトの設定と導入先を削除する。
+
+   ```powershell
+   & {
+       Set-Location -LiteralPath "$env:USERPROFILE\excel-diff" -ErrorAction Stop
+       "`n$([char]27)[7m 確認 $([char]27)[0m"
+       python scripts/setup-excel-diff.py --uninstall
+       if ($LASTEXITCODE -ne 0) { throw "中断: clone を削除せず、表示された理由を確認してください" }
+   }
+   ```
+
+   - 削除した Git 設定・attributes の区画・導入先、または「消すものがありません」と出て、エラーが無いこと
+   - `core.attributesFile` と、attributes の管理区画以外の行は残る
+   - 導入先を自動で見つけられない場合は、導入時と同じ `--install-dir` を指定してこの手順をやり直す
+   - 管理区画の目印や導入先の確認で止まった場合は、clone を消さず、表示された理由を確認する
+   - **次の手順は、この削除が成功してから貼る**
+
+1. ホームへ移り、clone を削除する（取り戻せない）。
+
+   ```powershell
+   & {
+       $excelDiffClone = Get-Item -LiteralPath "$env:USERPROFILE\excel-diff" -Force -ErrorAction Stop
+       if (-not $excelDiffClone.PSIsContainer -or ($excelDiffClone.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+           throw "中断: 通常の clone フォルダーではありません"
+       }
+       if ($excelDiffClone.FullName -ne [IO.Path]::GetFullPath("$env:USERPROFILE\excel-diff")) {
+           throw "中断: 削除先のパスが一致しません"
+       }
+       Set-Location -LiteralPath $env:USERPROFILE -ErrorAction Stop
+       Remove-Item -LiteralPath $excelDiffClone.FullName -Recurse -Force -ErrorAction Stop
+       "`n$([char]27)[7m 確認 $([char]27)[0m"
+       Test-Path -LiteralPath "$env:USERPROFILE\excel-diff"
+   }
+   ```
+
+   - `False` と出ること
+   - エラーが出た場合は、削除先を広げず、表示されたパスと使用中のファイルを確認する
+
+## AlmaLinux 10 のロールバック
+
+excel-diff の Git 設定と導入先を外し、最後に clone を削除します。Git・Python・lazygit は削除しません。
+
+- 前提: [excel-diff を導入・更新する](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)で、自分のユーザーに導入している
+- 実行場所: AlmaLinux 10 の自分のユーザー、bash
+- 貼った後は、反転表示の「確認」から後ろの出力を箇条書きで確かめる
+
+> [!CAUTION]
+> この節の手順 3 は `~/excel-diff` を削除します。未コミット・未 push の変更は取り戻せません。手順 1 の確認と手順 2 の削除が成功してから進んでください。
+
+1. clone で、未コミット・未 push の変更が無いことを確認する。
+
+   ```bash
+   (
+     cd "$HOME/excel-diff" || exit
+     git fetch --all --prune || exit
+     excel_diff_changes=$(git status --porcelain=v1 --untracked-files=all) || exit
+     excel_diff_unpushed=$(git log --oneline HEAD --branches --not --remotes) || exit
+     printf '\n\033[7m 確認 \033[0m\n'
+     if [ -n "$excel_diff_changes" ] || [ -n "$excel_diff_unpushed" ]; then
+       printf '%s\n' "$excel_diff_changes" "$excel_diff_unpushed"
+       printf '%s\n' '中断: 未コミット・未 push の変更を保管してからやり直してください' >&2
+       exit 1
+     fi
+     printf '%s\n' '未コミット・未 push の変更はありません'
+   )
+   ```
+
+   - 「未コミット・未 push の変更はありません」と出ること
+   - 変更やエラーが出た場合は、手順 2・3 へ進まず、必要なファイルを保管し、コミット・push の扱いを決めてからやり直す
+   - **次の手順は、この確認が成功してから貼る**
+
+1. clone で、導入スクリプトの設定と導入先を削除する。
+
+   ```bash
+   (
+     cd "$HOME/excel-diff" || exit
+     printf '\n\033[7m 確認 \033[0m\n'
+     python3 scripts/setup-excel-diff.py --uninstall
+   )
+   ```
+
+   - 削除した Git 設定・attributes の区画・導入先、または「消すものがありません」と出て、エラーが無いこと
+   - `core.attributesFile` と、attributes の管理区画以外の行は残る
+   - 導入先を自動で見つけられない場合は、導入時と同じ `--install-dir` を指定してこの手順をやり直す
+   - 管理区画の目印や導入先の確認で止まった場合は、clone を消さず、表示された理由を確認する
+   - **次の手順は、この削除が成功してから貼る**
+
+1. ホームへ移り、clone を削除する（取り戻せない）。
+
+   ```bash
+   (
+     if [ -L "$HOME/excel-diff" ] || [ ! -d "$HOME/excel-diff/.git" ]; then
+       printf '%s\n' '中断: 通常の clone フォルダーではありません' >&2
+       exit 1
+     fi
+     cd "$HOME" || exit
+     rm -rf -- "$HOME/excel-diff" || exit
+     printf '\n\033[7m 確認 \033[0m\n'
+     if [ ! -e "$HOME/excel-diff" ]; then
+       printf '%s\n' 'clone を削除しました'
+     else
+       printf '%s\n' '中断: clone が残っています' >&2
+       exit 1
+     fi
+   )
+   ```
+
+   - 「clone を削除しました」と出ること
+   - エラーが出た場合は、削除先を広げず、表示されたパスと使用中のファイルを確認する

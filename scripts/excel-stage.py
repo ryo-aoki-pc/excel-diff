@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 
-from excel_stage_ooxml import Workbook, WorkbookError, parse_record
+from excel_stage_ooxml import Workbook, WorkbookError, coordinate_key, parse_record
 
 
 class StageError(ValueError):
@@ -105,12 +105,30 @@ def prepare_session(repo, relative, directory, progress=None):
     if progress is not None:
         # Reading a large workbook takes seconds with nothing else on screen.
         progress("Excel を読み込んでいます。大きいブックでは選択画面が開くまで時間がかかります。")
+    base, work, baseline, changed = _load_books(base_data, work_data)
+    _save_snapshots(directory, base_data, work_data)
+    sheets = _build_picker(directory, base, baseline, changed, "現在の Excel インデックス")
+    state = {"repo": str(repo), "path": relative, "index": str(index), "mode": mode,
+             "oid": oid, "base_sha256": hashlib.sha256(base_data).hexdigest(),
+             "work_sha256": hashlib.sha256(work_data).hexdigest(),
+             "sheets": sheets, "target": "index", "applied": False}
+    write_json(directory / "session.json", state)
+    return state
+
+
+def _load_books(base_data, work_data):
     base, work = Workbook(base_data), Workbook(work_data)
     base.assert_compatible(work)
-    baseline, changed = base.projection(work), work.projection(base)
+    return base, work, base.projection(work), work.projection(base)
+
+
+def _save_snapshots(directory, base_data, work_data):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "base.xlsx").write_bytes(base_data)
     (directory / "work.xlsx").write_bytes(work_data)
+
+
+def _build_picker(directory, base, baseline, changed, message):
     picker = directory / "picker"
     picker.mkdir()
     picker_env = isolated_env()
@@ -122,7 +140,7 @@ def prepare_session(repo, relative, directory, progress=None):
     for key, value in options.items():
         git(picker, "config", key, value, env=picker_env)
     baseline_directory = directory / "baseline"
-    baseline_directory.mkdir()
+    baseline_directory.mkdir(exist_ok=True)
     sheets = []
     for number, sheet in enumerate(base.sheets, 1):
         safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", sheet.name).strip(" .") or "Sheet"
@@ -134,16 +152,11 @@ def prepare_session(repo, relative, directory, progress=None):
         (baseline_directory / filename).write_bytes(baseline_data)
         (picker / filename).write_bytes(baseline_data)
     git(picker, "add", "--all", env=picker_env)
-    git(picker, "commit", "--quiet", "--no-verify", "-m", "現在の Excel インデックス", env=picker_env)
+    git(picker, "commit", "--quiet", "--no-verify", "-m", message, env=picker_env)
     for sheet in sheets:
         with (picker / sheet["filename"]).open("w", encoding="utf-8", newline="\n") as output:
             output.write(changed[sheet["id"]])
-    state = {"repo": str(repo), "path": relative, "index": str(index), "mode": mode,
-             "oid": oid, "base_sha256": hashlib.sha256(base_data).hexdigest(),
-             "work_sha256": hashlib.sha256(work_data).hexdigest(),
-             "sheets": sheets, "applied": False}
-    write_json(directory / "session.json", state)
-    return state
+    return sheets
 
 
 def _record_lines(data):
@@ -161,6 +174,18 @@ def _record_lines(data):
             pending = lines.pop() if lines else ""
             for line in lines:
                 yield line[:-2] if line.endswith("\r\n") else line[:-1]
+
+
+def _selected_key(before_line, selected_line, sheet_id, base, work, incomplete, invalid):
+    expected, _ = parse_record(before_line)
+    coordinate, cell = parse_record(selected_line)
+    if coordinate != expected:
+        raise StageError(incomplete)
+    key = sheet_id, coordinate
+    before, after = base.cells.get(key), work.cells.get(key)
+    if cell != before and cell != after:
+        raise StageError(invalid(coordinate) if callable(invalid) else invalid)
+    return key if cell != before else None
 
 
 def selected_cells(directory, state, base, work):
@@ -192,15 +217,10 @@ def selected_cells(directory, state, base, work):
             # a handful of edits; only replacements need JSON validation.
             if before_line == selected_line and not validate_all:
                 continue
-            expected, _ = parse_record(before_line)
-            coordinate, cell = parse_record(selected_line)
-            if coordinate != expected:
-                raise StageError(sheet["name"] + " のセル置換が不完全です。削除行と追加行を一緒に選んでください。")
-            key = sheet_id, coordinate
-            before, after = base.cells.get(key), work.cells.get(key)
-            if cell != before and cell != after:
-                raise StageError(sheet["name"] + "!" + coordinate + " の選択が不完全です。セル変更全体を選んでください。")
-            if cell != before:
+            key = _selected_key(before_line, selected_line, sheet_id, base, work,
+                                sheet["name"] + " のセル置換が不完全です。削除行と追加行を一緒に選んでください。",
+                                lambda coordinate: sheet["name"] + "!" + coordinate + " の選択が不完全です。セル変更全体を選んでください。")
+            if key is not None:
                 selected.add(key)
     return selected
 
@@ -211,13 +231,7 @@ def assert_work_unchanged(repo, state):
         raise StageError("作業ファイルが選択開始後に変更されています。画面を閉じて選び直してください。")
 
 
-def apply_session(directory):
-    """Apply once, preserving concurrent index edits to other files."""
-    directory = Path(directory).resolve()
-    state_path = directory / "session.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    if state["applied"]:
-        raise StageError("この選択は反映済みです。q で戻り、E で新しく開いてください。")
+def _session_books(directory, state):
     if "base_sha256" not in state:
         raise StageError("選択画面の形式が更新されています。画面を閉じて選び直してください。")
     base_data = (directory / "base.xlsx").read_bytes()
@@ -226,6 +240,19 @@ def apply_session(directory):
             hashlib.sha256(work_data).hexdigest() != state["work_sha256"]):
         raise StageError("選択開始時の Excel が変更されています。画面を閉じて選び直してください。")
     base, work = Workbook(base_data), Workbook(work_data)
+    return base, work
+
+
+def apply_session(directory):
+    """Apply once, preserving concurrent index edits to other files."""
+    directory = Path(directory).resolve()
+    state_path = directory / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if state.get("target", "index") != "index":
+        raise StageError("取り込みの選択画面は部分ステージに使えません。")
+    if state["applied"]:
+        raise StageError("この選択は反映済みです。q で戻り、E で新しく開いてください。")
+    base, work = _session_books(directory, state)
     selected = selected_cells(directory, state, base, work)
     if not selected:
         return 0
@@ -270,11 +297,11 @@ def check_tools():
             raise StageError(name + " は " + ".".join(map(str, minimum)) + " 以降が必要です。")
 
 
-def picker_config(directory):
+def picker_config(directory, merge=False):
     # JSON is also valid YAML; no YAML dependency or per-machine paths in the
     # synced outer config. Paths here exist only for this private session.
     helper = Path(__file__).resolve()
-    command_parts = [sys.executable, str(helper), "--apply-session", str(directory)]
+    command_parts = [sys.executable, str(helper), "--apply-merge-session" if merge else "--apply-session", str(directory)]
     if os.name == "nt":
         command = subprocess.list2cmdline(command_parts)
     else:
@@ -288,16 +315,17 @@ def picker_config(directory):
              "name": "delta side-by-side"}, {"type": "rawGit", "name": "default"}]},
         "update": {"method": "never"}, "disableStartupPopups": True,
         "customCommands": [{"key": "X", "context": "global", "command": command,
-                            "description": "選択セルを Excel へステージ (反映後 q で戻る)",
-                            "output": "popup", "outputTitle": "Excel の部分ステージ"}],
+                            "description": ("選択セルを取り込み先へ書き込む (反映後 q で戻る)" if merge else
+                                            "選択セルを Excel へステージ (反映後 q で戻る)"),
+                            "output": "popup", "outputTitle": "Excel の取り込み" if merge else "Excel の部分ステージ"}],
     }
     path = directory / "config.json"
     write_json(path, config)
     return path
 
 
-def run_picker(directory):
-    config = picker_config(directory)
+def run_picker(directory, merge=False):
+    config = picker_config(directory, merge=merge)
     state_dir = directory / "lazygit-state"
     state_dir.mkdir()
     return subprocess.run(["lazygit", "--use-config-dir", str(state_dir),
@@ -351,14 +379,420 @@ def cleanup_session(directory, retries=20, delay=0.5):
     return False
 
 
+def resolve_user_path(value):
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path.cwd() / os.environ.get("GIT_PREFIX", "") / path
+    # abspath normalizes x/../ without hiding a final symlink from the checks.
+    return Path(os.path.abspath(path))
+
+
+def check_target_writable(path):
+    path = Path(path)
+    try:
+        attributes = path.lstat()
+    except FileNotFoundError:
+        raise StageError("取り込み先がありません: " + str(path)) from None
+    if stat.S_ISLNK(attributes.st_mode) or not stat.S_ISREG(attributes.st_mode):
+        raise StageError("取り込み先はリンクではない通常のファイルを指定してください: " + str(path))
+    if attributes.st_nlink > 1:
+        raise StageError("ハードリンクの取り込み先には書き込めません: " + str(path))
+    if not os.access(path, os.W_OK) or not attributes.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+        raise StageError("取り込み先に書き込めません（読み取り専用）: " + str(path))
+    if os.name == "nt":
+        try:
+            descriptor = os.open(path, os.O_RDWR)
+            os.close(descriptor)
+        except PermissionError as error:
+            raise PermissionError("取り込み先を Excel などで開いているなら閉じてからやり直してください: " + str(path)) from error
+    elif (path.parent / (".~lock." + path.name + "#")).exists():
+        raise StageError("LibreOffice のロックファイルがあります。取り込み先を閉じてください: " + str(path))
+    return attributes
+
+
+def _same_file(target, source):
+    left, right = target.stat(), source.stat()
+    if left.st_ino and right.st_ino:
+        return os.path.samefile(target, source)
+    return os.path.normcase(os.path.realpath(target)) == os.path.normcase(os.path.realpath(source))
+
+
+def _merge_projections(base, work, baseline=None, changed=None):
+    if baseline is None:
+        baseline, changed = base.projection(work), work.projection(base)
+    differences, unsupported = 0, []
+    blocked = set()
+    names = {sheet.id: sheet.name for sheet in base.sheets}
+    for key in base.cells.keys() | work.cells.keys():
+        if base.cells.get(key) == work.cells.get(key):
+            continue
+        differences += 1
+        reasons = list(dict.fromkeys(reason for reason in
+                                    (base.unsupported_reason(key), work.unsupported_reason(key)) if reason))
+        if reasons:
+            blocked.add(key)
+            unsupported.append({"sheet": names[key[0]], "coordinate": key[1], "reason": "・".join(reasons)})
+    # Escape the additional Unicode line separators only in merge projections.
+    for sheet in base.sheets:
+        identifier = sheet.id
+        before = baseline[identifier].split("\n")
+        after = changed[identifier].split("\n")
+        if blocked:
+            for number, line in enumerate(before):
+                # Only differing records can be blocked; skip parsing the rest.
+                if line != after[number] and (identifier, json.loads(line)[0]) in blocked:
+                    after[number] = line
+        for projection, lines in ((baseline, before), (changed, after)):
+            projection[identifier] = "\n".join(lines).replace("\x85", "\\u0085").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    unsupported.sort(key=lambda item: (list(names.values()).index(item["sheet"]), coordinate_key(item["coordinate"])))
+    return baseline, changed, differences, unsupported
+
+
+_WINMERGE_HEADERS = (
+    "# 右（取り込み元）から左（取り込み先）へ、取り込むセルの行をコピーする",
+    "# 上書き保存（Ctrl+S）してから WinMerge を閉じると、取り込み先のブックに書き込む",
+)
+
+
+def _winmerge_text(base, projection):
+    pieces = [*_WINMERGE_HEADERS]
+    for number, sheet in enumerate(base.sheets, 1):
+        title = json.dumps(sheet.name, ensure_ascii=False)
+        title = title.replace("\x85", "\\u0085").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+        pieces.append("# シート " + str(number) + ": " + title)
+        # Empty worksheets contribute a heading, without an extra blank record.
+        pieces.extend(projection[sheet.id].rstrip("\n").split("\n") if projection[sheet.id] else [])
+    return ("\ufeff" + "\n".join(pieces) + "\n").encode("utf-8")
+
+
+def prepare_merge_session(target, source, directory, tool="lazygit"):
+    target, source, directory = resolve_user_path(target), resolve_user_path(source), Path(directory).resolve()
+    for path in (target, source):
+        if path.suffix.lower() not in SUPPORTED:
+            raise StageError("取り込みの対象は .xlsx / .xlsm / .xltx / .xltm です: " + str(path))
+    check_target_writable(target)
+    if not source.is_file():
+        raise StageError("取り込み元は通常のファイルを指定してください: " + str(source))
+    if _same_file(target, source):
+        raise StageError("取り込み先と取り込み元が同じファイルです。")
+    base_data, work_data = target.read_bytes(), source.read_bytes()
+    base, work, baseline, changed = _load_books(base_data, work_data)
+    baseline, changed, differences, unsupported = _merge_projections(base, work, baseline, changed)
+    _save_snapshots(directory, base_data, work_data)
+    state = {"target": "file", "tool": tool, "path": str(target), "source": str(source),
+             "base_sha256": hashlib.sha256(base_data).hexdigest(),
+             "work_sha256": hashlib.sha256(work_data).hexdigest(),
+             "differences": differences, "unsupported": unsupported, "applied": False, "sheets": []}
+    if tool == "lazygit":
+        state["sheets"] = _build_picker(directory, base, baseline, changed, "取り込み先の Excel")
+    elif tool == "winmerge":
+        (directory / "winmerge").mkdir()
+        (directory / "baseline").mkdir()
+        left, right = "winmerge/取り込み先.cells.txt", "winmerge/取り込み元.cells.txt"
+        backup = "baseline/取り込み先.cells.txt"
+        original = _winmerge_text(base, baseline)
+        (directory / left).write_bytes(original)
+        (directory / right).write_bytes(_winmerge_text(base, changed))
+        (directory / backup).write_bytes(original)
+        state["sheets"] = [{"id": sheet.id, "name": sheet.name} for sheet in base.sheets]
+        state["winmerge"] = {"left": left, "right": right, "baseline": backup,
+                             "baseline_sha256": hashlib.sha256(original).hexdigest()}
+    else:
+        raise StageError("選択画面の道具が不正です: " + tool)
+    write_json(directory / "session.json", state)
+    return state
+
+
+def _assert_target_unchanged(path, expected_sha256):
+    check_target_writable(path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+        raise StageError("取り込み先が選択開始後に変更されています。画面を閉じて選び直してください: " + str(path))
+
+
+def replace_file(path, data, expected_sha256):
+    """Replace in the same directory, checking the captured target before every attempt."""
+    path = Path(path)
+    attributes = check_target_writable(path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".excel-merge-", suffix=path.suffix, dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, stat.S_IMODE(attributes.st_mode))
+        if os.name == "nt":
+            # Keep the downloaded-file mark so Excel still opens it in
+            # Protected View. FAT and some network shares have no streams.
+            try:
+                zone = Path(str(path) + ":Zone.Identifier").read_bytes()
+            except OSError:
+                zone = None
+            if zone is not None:
+                Path(str(temporary) + ":Zone.Identifier").write_bytes(zone)
+        for attempt in range(6):
+            _assert_target_unchanged(path, expected_sha256)
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError as error:
+                if attempt == 5:
+                    raise PermissionError("取り込み先を Excel などで開いているなら閉じてから再試行してください: " + str(path)) from error
+                time.sleep(0.2)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _merge_state(directory):
+    state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    if state.get("target") != "file":
+        raise StageError("部分ステージの選択画面は取り込みに使えません。")
+    if state["applied"]:
+        raise StageError("この選択は反映済みです。画面を閉じて新しく選び直してください。")
+    return state
+
+
+def _write_merge(directory, state, base, work, selected):
+    if not selected:
+        return 0
+    rebuilt = base.rebuild(work, selected)
+    replace_file(Path(state["path"]), rebuilt, state["base_sha256"])
+    state["applied"], state["count"] = True, len(selected)
+    write_json(directory / "session.json", state)
+    return len(selected)
+
+
+def apply_merge_session(directory):
+    directory = Path(directory).resolve()
+    state = _merge_state(directory)
+    base, work = _session_books(directory, state)
+    selected = (winmerge_selected_cells(directory, state, base, work) if state["tool"] == "winmerge" else
+                selected_cells(directory, state, base, work))
+    return _write_merge(directory, state, base, work, selected)
+
+
+def _winmerge_lines(data):
+    # Validate encoding strictly; compare records as bytes, without normalizing JSON.
+    data.decode("utf-8-sig")
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    lines = data.replace(b"\r\n", b"\n").split(b"\n")
+    while lines and lines[-1] == b"":
+        lines.pop()
+    return lines
+
+
+def winmerge_selected_cells(directory, state, base, work):
+    base.assert_compatible(work)
+    details = state["winmerge"]
+    original = (directory / details["baseline"]).read_bytes()
+    if hashlib.sha256(original).hexdigest() != details["baseline_sha256"]:
+        raise StageError("選択開始時の射影が変更されています。画面を閉じて選び直してください。")
+    baseline, changed, _, _ = _merge_projections(base, work)
+    if original != _winmerge_text(base, baseline):
+        raise StageError("選択開始時の射影が Excel と一致しません。画面を閉じて選び直してください。")
+    try:
+        saved = _winmerge_lines((directory / details["left"]).read_bytes())
+    except UnicodeError as error:
+        raise StageError("WinMerge の保存文字コードは UTF-8 にしてください。") from error
+    before, after = _winmerge_lines(original), _winmerge_lines(_winmerge_text(base, changed))
+    selected, sheet_index, last_coordinate = set(), -1, "A1"
+    missing = object()
+    for old, new, source in zip_longest(before, saved, after, fillvalue=missing):
+        if old is missing or new is missing:
+            if isinstance(old, bytes) and old.startswith(b"["):
+                last_coordinate = parse_record(old.decode("utf-8"))[0]
+            raise StageError("セルの行数が変わっています: " + last_coordinate + "。セルの行全体をコピーしてください。")
+        if old.startswith(b"#"):
+            if old != new:
+                raise StageError("WinMerge の見出しが変更されています。見出しの行を元に戻してください。")
+            if old.startswith("# シート ".encode("utf-8")):
+                sheet_index += 1
+            continue
+        coordinate = parse_record(old.decode("utf-8"))[0]
+        last_coordinate = coordinate
+        sheet = base.sheets[sheet_index]
+        location = sheet.name + "!" + coordinate
+        if new == old:
+            continue
+        if new != source:
+            try:
+                saved_coordinate = parse_record(new.decode("utf-8"))[0]
+            except WorkbookError:
+                saved_coordinate = "不正なセル行"
+            raise StageError(location + " の選択が不正です（保存行: " + saved_coordinate +
+                             "）。取り込み先か取り込み元のセルの行全体をコピーしてください。")
+        key = _selected_key(old.decode("utf-8"), new.decode("utf-8"), sheet.id, base, work,
+                            location + " のセル置換が不完全です。", location + " の選択が不完全です。")
+        if key is not None:
+            selected.add(key)
+    return selected
+
+
+def find_winmerge():
+    if os.name == "nt":
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(hive, r"Software\Thingamahoochie\WinMerge") as key:
+                        candidate, _ = winreg.QueryValueEx(key, "Executable")
+                    if isinstance(candidate, str) and os.path.isfile(candidate):
+                        return candidate
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+        for variable, suffix in (("LOCALAPPDATA", ("Programs", "WinMerge", "WinMergeU.exe")),
+                                 ("ProgramFiles", ("WinMerge", "WinMergeU.exe"))):
+            parent = os.environ.get(variable)
+            if parent:
+                candidate = os.path.join(parent, *suffix)
+                if os.path.isfile(candidate):
+                    return candidate
+    return shutil.which("WinMergeU.exe")
+
+
+def choose_tool(name="auto"):
+    if name == "winmerge":
+        if not find_winmerge():
+            raise StageError("WinMerge がありません。WinMerge を導入するか --tool lazygit を指定してください。")
+        return name
+    if name == "auto":
+        return "winmerge" if os.name == "nt" and find_winmerge() else "lazygit"
+    if name != "lazygit":
+        raise StageError("選択画面の道具が不正です: " + name)
+    return name
+
+
+def _launch_winmerge(directory, state):
+    executable = find_winmerge()
+    if not executable:
+        raise StageError("WinMerge がありません。WinMerge を導入するか --tool lazygit を指定してください。")
+    details = state["winmerge"]
+    left, right = directory / details["left"], directory / details["right"]
+    command = [executable, "/s-", "/e", "/u", "/fl", "/wr", "/t", "text",
+               "/dl", "取り込み先（書き換える）: " + Path(state["path"]).name,
+               "/dr", "取り込み元: " + Path(state["source"]).name, str(left), str(right)]
+    left_before = left.read_bytes()
+    started = time.monotonic()
+    # The exit status says nothing about the choice; the saved left text does.
+    subprocess.run(command)
+    if time.monotonic() - started <= 2 and left.read_bytes() == left_before:
+        print("WinMerge がすぐ終了しました。保存せずに閉じた場合、取り込み先は変えていません。", file=sys.stderr)
+
+
+def _winmerge_select(directory, state):
+    """Open WinMerge until the saved left text is a valid choice."""
+    books = None
+    while True:
+        _launch_winmerge(directory, state)
+        try:
+            # Read the snapshots once, after the window closes, so a large
+            # workbook does not stay in memory while WinMerge is open.
+            if books is None:
+                books = _session_books(directory, state)
+            return winmerge_selected_cells(directory, state, *books), books
+        except (StageError, WorkbookError, UnicodeError) as error:
+            if not sys.stdin.isatty():
+                raise
+            print(str(error), file=sys.stderr)
+            if input("WinMerge を開き直して直しますか [y/N]: ").strip().lower() != "y":
+                raise
+
+
+def run_winmerge(directory):
+    directory = Path(directory).resolve()
+    return _winmerge_select(directory, _merge_state(directory))[0]
+
+
+def _merge_with_winmerge(directory):
+    directory = Path(directory).resolve()
+    state = _merge_state(directory)
+    selected, (base, work) = _winmerge_select(directory, state)
+    while True:
+        try:
+            return _write_merge(directory, state, base, work, selected)
+        except PermissionError as error:
+            if not sys.stdin.isatty():
+                raise
+            print(str(error), file=sys.stderr)
+            if input("取り込み先を閉じてから Enter で再試行します（q で中止）: ").strip().lower() == "q":
+                raise
+
+
+def _apply_merge_cli(directory):
+    try:
+        count = apply_merge_session(directory)
+        print(str(count) + " セルを取り込み先へ書き込みました。q で元の画面へ戻ってください。" if count else
+              "セル変更が選択されていません。Enter・Space でハンクを選び、X で反映してください。")
+        return 0
+    except (StageError, WorkbookError, OSError, UnicodeError, ValueError, KeyboardInterrupt) as error:
+        print("Excel の取り込みに失敗しました: " + str(error), file=sys.stderr)
+        return 1
+
+
+def merge_main(argv=None):
+    parser = argparse.ArgumentParser(description="2 つの Excel のセル変更を取り込む")
+    parser.add_argument("--tool", choices=("auto", "winmerge", "lazygit"), default="auto")
+    parser.add_argument("target")
+    parser.add_argument("source")
+    args = parser.parse_args(argv)
+    directory = None
+    try:
+        target, source = resolve_user_path(args.target), resolve_user_path(args.source)
+        tool = choose_tool(args.tool)
+        if tool == "lazygit":
+            check_tools()
+        print("書き換えるファイル: " + str(target), flush=True)
+        print("取り込み元: " + str(source), flush=True)
+        print("Excel を読み込んでいます。大きいブックでは画面が開くまで時間がかかります。", flush=True)
+        directory = Path(tempfile.mkdtemp(prefix="excel-merge-"))
+        state = prepare_merge_session(target, source, directory, tool=tool)
+        unsupported = state["unsupported"]
+        if unsupported:
+            examples = ", ".join(item["sheet"] + "!" + item["coordinate"] + "（" + item["reason"] + "）" for item in unsupported[:20])
+            if len(unsupported) > 20:
+                examples += "、ほか " + str(len(unsupported) - 20) + " セル"
+            print("取り込めない違い（" + str(len(unsupported)) + " セル）: " + examples, flush=True)
+        if state["differences"] == len(unsupported):
+            print("取り込める差分がありません（取り込めない違い " + str(len(unsupported)) + " セル）。取り込み先は変えていません。" if unsupported else
+                  "差分がありません。取り込み先は変えていません。")
+            return 0
+        if tool == "winmerge":
+            print("WinMerge で、取り込むセルの行を右から左へコピーし、上書き保存（Ctrl+S）してから WinMerge の窓を閉じてください。", flush=True)
+            count = _merge_with_winmerge(directory)
+            result = 0
+        else:
+            print("専用画面で、取り込むハンクを Enter → Space で選び、X で書き込んでください。q で閉じると取り消します。", flush=True)
+            result = run_picker(directory, merge=True)
+            state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+            count = state.get("count", 0) if state["applied"] else 0
+        print(str(count) + " セルを取り込み先へ書き込みました: " + str(target) if count else
+              "取り込むセルが選ばれていません。取り込み先は変えていません。")
+        return result
+    except (StageError, WorkbookError, OSError, UnicodeError, ValueError, KeyboardInterrupt) as error:
+        print("Excel の取り込みに失敗しました: " + str(error), file=sys.stderr)
+        return 1
+    finally:
+        if directory is not None:
+            cleanup_session(directory)
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["--merge"]:
+        return merge_main(arguments[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("file", nargs="?", help="既存の Excel ファイル")
     parser.add_argument("--apply-session", type=Path, help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
+    parser.add_argument("--apply-merge-session", type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args(arguments)
+    if args.apply_merge_session is not None:
+        return _apply_merge_cli(args.apply_merge_session)
     try:
         if args.apply_session is not None:
             count = apply_session(args.apply_session)

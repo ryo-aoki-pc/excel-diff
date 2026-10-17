@@ -6,6 +6,7 @@ import hashlib
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import venv
@@ -41,8 +42,9 @@ def default_install_directory():
     return base / "excel-diff"
 
 
-def git_values(key, path=False, scope="global"):
-    command = ["git", "config", "--" + scope, "--includes", "--null"]
+def git_values(key, path=False, scope="global", includes=True):
+    command = ["git", "config", "--" + scope,
+               "--includes" if includes else "--no-includes", "--null"]
     if path:
         command.append("--path")
     result = subprocess.run(
@@ -119,10 +121,21 @@ def textconv_command(python, converter):
     return " ".join(shlex.quote(part if isinstance(part, str) else part.as_posix()) for part in parts)
 
 
-def stage_alias(python, helper):
+def helper_alias(python, helper, *options):
     # Git shell aliases append the user's arguments, including the -- path
     # separator. POSIX quoting works with Git for Windows' bundled shell too.
-    return "!" + " ".join(shlex.quote(path.as_posix()) for path in (python, helper))
+    return "!" + " ".join(
+        shlex.quote(value.as_posix() if isinstance(value, Path) else value)
+        for value in (python, helper, *options)
+    )
+
+
+def stage_alias(python, helper):
+    return helper_alias(python, helper)
+
+
+def merge_alias(python, helper):
+    return helper_alias(python, helper, "--merge")
 
 
 def registered_converter(command):
@@ -160,6 +173,147 @@ def verify(converter, source, attributes, expected, helper, helper_source, modul
         raise RuntimeError("Excel 用の attributes が未設定か変更されています。セットアップを再実行してください。")
 
 
+UNINSTALL_KEYS = (
+    "diff.excel.textconv",
+    "diff.excel.binary",
+    "diff.excel.cachetextconv",
+    "alias.excel-stage",
+    "alias.excel-merge",
+)
+
+
+def without_attribute_block(content):
+    # Work on byte ranges so unrelated encodings, BOMs and line endings survive.
+    begin = b"# BEGIN lazygit Excel textconv (setup-excel-diff.py)"
+    end = b"# END lazygit Excel textconv (setup-excel-diff.py)"
+    starts = []
+    ends = []
+    offset = 0
+    bom = b"\xef\xbb\xbf"
+    for line in content.splitlines(keepends=True):
+        marker = line.rstrip(b"\r\n")
+        marker_offset = offset
+        if offset == 0 and marker.startswith(bom):
+            marker = marker[len(bom):]
+            marker_offset += len(bom)
+        if marker == begin:
+            starts.append(marker_offset)
+        elif marker == end:
+            ends.append(offset + len(line))
+        offset += len(line)
+    if not starts and not ends:
+        return content
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise RuntimeError(
+            "attributes の Excel 用区画の目印が壊れています。設定は変更していません。"
+        )
+    return content[:starts[0]] + content[ends[0]:]
+
+
+def linked_directory(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    # Windows junctions are not symlinks, but resolve() would follow them before
+    # rmtree() sees the requested path. Reject all reparse-point directories.
+    return path.is_symlink() or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def validate_uninstall_directory(directory, root):
+    try:
+        directory.lstat()
+    except FileNotFoundError:
+        return False
+    if directory == root or directory in root.parents or root in directory.parents:
+        raise RuntimeError("リポジトリのフォルダーは削除できません: " + str(directory))
+    # Check ancestors directly as Git may refuse repositories owned by another
+    # account. A worktree's .git file also counts as a repository marker.
+    for parent in (directory, *directory.parents):
+        if (parent / ".git").exists() or (parent / ".git").is_symlink() or (
+            (parent / "HEAD").is_file() and (parent / "objects").is_dir()
+            and (parent / "refs").is_dir()
+        ):
+            raise RuntimeError("リポジトリの中のフォルダーは削除できません: " + str(directory))
+    if not directory.is_dir() or linked_directory(directory):
+        raise RuntimeError("導入先の形を確認できないため削除しません: " + str(directory))
+    # GIT_DIR/GIT_WORK_TREE can define a worktree without a .git marker.
+    repository = subprocess.run(
+        ["git", "-C", str(directory), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if repository.returncode == 0 and repository.stdout.strip() == "true":
+        raise RuntimeError("リポジトリの中のフォルダーは削除できません: " + str(directory))
+    if repository.returncode not in (0, 128) or (
+        repository.returncode != 0 and (os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE"))
+    ):
+        raise RuntimeError("導入先がリポジトリの外か確認できないため削除しません: " + str(directory))
+    converter_found = False
+    helper_found = False
+    for entry in directory.iterdir():
+        if linked_directory(entry):
+            raise RuntimeError("導入先にリンクがあるため削除しません: " + str(entry))
+        if entry.name in ("venv", "cache") and entry.is_dir():
+            continue
+        if (entry.name.startswith("excel-textconv-") and entry.name.endswith(".py")
+                and entry.is_file()):
+            converter_found = True
+            continue
+        if (entry.name.startswith("excel-stage-") and entry.is_dir()
+                and (entry / "excel-stage.py").is_file()):
+            helper_found = True
+            continue
+        raise RuntimeError("導入スクリプトが作った形ではないため削除しません: " + str(directory))
+    if not (directory / "venv").is_dir() or not (converter_found or helper_found):
+        raise RuntimeError("導入スクリプトが作った形ではないため削除しません: " + str(directory))
+    return True
+
+
+def uninstall(directory, root):
+    # Complete every validation before changing Git, attributes or installation.
+    attributes = attributes_file()
+    try:
+        existing = attributes.read_bytes()
+    except FileNotFoundError:
+        existing = b""
+    remaining = without_attribute_block(existing)
+    remove_directory = validate_uninstall_directory(directory, root)
+    configured = {key: git_values(key) for key in UNINSTALL_KEYS}
+    for key, values in configured.items():
+        if values != git_values(key, includes=False):
+            raise RuntimeError(
+                "Git の include 先に " + key + " があります。include 先を整理してから再実行してください。"
+                "設定は変更していません。"
+            )
+    removed = False
+    for key, values in configured.items():
+        if not values:
+            continue
+        result = subprocess.run(
+            ["git", "config", "--global", "--unset-all", key],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        if result.returncode not in (0, 5):
+            raise RuntimeError("Git 設定を削除できません: " + result.stderr.strip())
+        if result.returncode == 0:
+            print("削除した Git 設定: " + key)
+            removed = True
+    if remaining != existing:
+        attributes.write_bytes(remaining)
+        print("削除した attributes の Excel 用区画: " + str(attributes))
+        removed = True
+    if remove_directory:
+        shutil.rmtree(directory)
+        print("削除した導入先: " + str(directory))
+        removed = True
+    if not removed:
+        print("消すものがありません")
+    return 0
+
+
 def main():
     if sys.version_info < (3, 9):
         print("Python 3.9 以降で実行してください。", file=sys.stderr)
@@ -169,19 +323,26 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", type=Path,
                         help="仮想環境と Excel 用スクリプトの保存先 (既定: ユーザーのデータ領域の excel-diff。リポジトリの外)")
-    parser.add_argument("--check", action="store_true", help="設定を変更せず、インストール状態を確認する")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="設定を変更せず、インストール状態を確認する")
+    mode.add_argument("--uninstall", action="store_true", help="Excel 用の Git 設定・attributes の区画・導入先を削除する")
     args = parser.parse_args()
     try:
         root = Path(__file__).resolve().parent.parent
         selected_directory = args.install_dir
-        if args.check and selected_directory is None:
+        if (args.check or args.uninstall) and selected_directory is None:
             commands = git_values("diff.excel.textconv")
             registered = registered_converter(commands[-1]) if commands else None
             if registered is not None:
                 selected_directory = registered.parent
-        directory = (selected_directory or default_install_directory()).expanduser().resolve()
+        requested_directory = (selected_directory or default_install_directory()).expanduser()
+        if args.uninstall and linked_directory(requested_directory):
+            raise RuntimeError("導入先のリンクは削除しません: " + str(requested_directory))
+        directory = requested_directory.resolve()
         if directory == root or root in directory.parents:
             raise RuntimeError("--install-dir はこのリポジトリの外を指定してください。")
+        if args.uninstall:
+            return uninstall(directory, root)
         source_path = root / "scripts/excel-textconv.py"
         source = source_path.read_bytes()
         helper_source = (root / "scripts/excel-stage.py").read_bytes()
@@ -208,6 +369,7 @@ def main():
         expected = {
             "diff.excel.textconv": textconv_command(python, converter),
             "alias.excel-stage": stage_alias(python, helper),
+            "alias.excel-merge": merge_alias(python, helper),
             "diff.excel.binary": "true",
             # The converter keeps its own cache. Git's cache would store the
             # temporary "converting" text of a large workbook for good.
@@ -237,6 +399,7 @@ def main():
               else "Excel 差分と部分ステージをグローバルに設定しました。")
         print("変換スクリプト: " + str(converter))
         print("部分ステージ: " + str(helper))
+        print("取り込み: git excel-merge")
         print("attributes: " + str(attributes))
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as error:
