@@ -30,8 +30,13 @@ git excel-merge -- "取り込み先.xlsx" "取り込み元.xlsx"
 - WinMerge は左が取り込み先、右が取り込み元です。取り込むセルの行を右から左へコピーし、上書き保存（`Ctrl+S`）してから窓を閉じます。
 - lazygit は専用画面で `Enter` → `Space` でハンクを選び、`X` で取り込み先へ書き込みます。書き込む前に `q` で閉じると取り消します。
 
-<!-- 画像: WinMerge の取り込みの画面 -->
-<!-- 画像: lazygit の取り込みの専用画面 -->
+**WinMerge** — 左が取り込み先（見出しに「取り込み先（書き換える）」）、右が取り込み元（読み取り専用）。色の付いた行がセルの違いで、右から左へコピーした行のセルを取り込みます（Windows 11 の WinMerge 2.16.58.2 で、試験用のブックを開いた画面）。
+
+![WinMerge の取り込みの画面。左の見出しが「取り込み先（書き換える）: 見積.xlsx」、右が「取り込み元: 見積-更新.xlsx」で、B2・C3・A4〜D5・D6 などの行が違いとして色付きで並ぶ](docs/images/winmerge-merge.png)
+
+**lazygit** — 左が取り込み先、右が取り込み元のセル。`Enter` → `Space` でステージしたハンクのセルを、`X` で取り込み先へ書き込みます（同じブックを Windows 11 の lazygit 0.66.0・delta 0.20.1 で開いた画面）。
+
+![lazygit の取り込みの専用画面。ファイル一覧に「001-見積.cells.txt」「002-備考.cells.txt」、右の差分に B2 の 10 と 12、C3 の 80 と 90 などが左右に並ぶ](docs/images/lazygit-merge.png)
 
 操作の手順は「導入」の表から、[取り込みの仕様](docs/reference/readme.md#2-つのブックの取り込み)と[注意点](docs/extra/readme.md#取り込みの注意点)は各文書を参照してください。
 
@@ -47,7 +52,9 @@ git excel-merge -- "取り込み先.xlsx" "取り込み元.xlsx"
  C2	formula: "=B2*1.1"
 ```
 
-<!-- 画像: lazygit の通常の Excel の差分の表示 -->
+lazygit では、Git のリポジトリの中の変更したブックを選ぶと、セルの差分が delta の左右比較で出ます（Windows 11 の lazygit 0.66.0・delta 0.20.1、試験用のブック）。
+
+![lazygit の Excel の差分の表示。「見積.xlsx」を選ぶと、B2 の 10 と 12、C3 の 80 と 90、D6 の数式の違いなどが左右に並ぶ](docs/images/lazygit-diff.png)
 
 ## 文書
 

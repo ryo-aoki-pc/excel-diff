@@ -2,7 +2,62 @@
 
 [導入・更新手順](../../README.md)
 
-2026-10-08 には Excel の textconv 差分表示を Debian 13.6 のコンテナと Windows 11 の実機で、部分ステージを AlmaLinux 10.2 で確認しました。2026-10-09 には Windows 11 の実機で Excel の部分ステージを確認しました。2026-10-17 には Windows 11 の実機で、大きいブックの部分ステージを速くし、使うメモリを減らした版を確認しました。
+2026-10-08 には Excel の textconv 差分表示を Debian 13.6 のコンテナと Windows 11 の実機で、部分ステージを AlmaLinux 10.2 で確認しました。2026-10-09 には Windows 11 の実機で Excel の部分ステージを確認しました。2026-10-17 には Windows 11 の実機で、大きいブックの部分ステージを速くし、使うメモリを減らした版を確認しました。2026-10-18 には、2 つのブックの取り込み(`git excel-merge`)を Windows 11 と Raspberry Pi 5 の実機で確認しました。
+
+## 2 つのブックの取り込み（2026-10-18）
+
+`git excel-merge`（WinMerge と lazygit の専用画面）と、導入スクリプトの `alias.excel-merge`・`--uninstall` を、Windows 11 の実機と Raspberry Pi 5 の実機で確かめた。
+
+- 環境（Windows）: Windows 11 Pro(ビルド 26300)、Git 2.55.0.windows.5、Python 3.14.8(scoop)、openpyxl 3.1.5、xlrd 2.0.2、lxml 6.1.3、WinMerge 2.16.58.2(winget の `WinMerge.WinMerge`、ユーザー単位)、lazygit 0.66.0・delta 0.20.1(scoop)、WezTerm 20260905-153129-092dcf70
+- 環境（Linux）: Raspberry Pi 5 の AlmaLinux 10.2(aarch64。Python 3.14.8 と lazygit 0.66.0・delta 0.20.1 は Homebrew、Git 2.52.0、tmux next-3.4)。自動テストは同じ PC の WSL の AlmaLinux 10(Python 3.12.13、Git 2.52.0)でも走らせた
+- 方法: `GIT_CONFIG_GLOBAL`・`XDG_CONFIG_HOME`(Linux は `XDG_DATA_HOME` も)を一時フォルダーに向け、`--install-dir` も一時フォルダーにして導入した。実際のグローバル Git 設定と導入先は変えていない
+- 試験用のブック: openpyxl で作った `見積.xlsx`(取り込み先。シート `見積` と `備考`、見出しの行は太字と黄色の塗り)と `見積-更新.xlsx`(取り込み元。`見積` の B2・C3 の値、A4〜D4 を消して A5〜D5 を足し、D6 の数式を変えた。`備考` の B2 の値を変え、B3 をリッチテキストにした。見出しの塗りは青)
+
+### 自動テストと導入
+
+- `python -B -m unittest discover -s tests` は 159 件だった。Windows は 153 件が成功し、POSIX だけのテスト 6 件を飛ばした。WSL の AlmaLinux 10 と abiko-pi は 155 件が成功し、Windows だけのテスト 4 件を飛ばした
+- 導入と `--check` は、どちらも「取り込み: git excel-merge」の行を出し、`alias.excel-merge` は `alias.excel-stage` と同じ build の `excel-stage.py` に `--merge` を付けた形だった(Windows と abiko-pi)
+- Windows で `--uninstall` を 2 回走らせた。1 回目は 5 つの Git 設定・attributes の区画・導入先を消し、`core.attributesFile` は残った(attributes のファイルは区画だけを書いていたので 0 バイトになった)。2 回目は「消すものがありません」で終了コード 0 だった
+
+### WinMerge
+
+- Git のリポジトリの外のフォルダーで `git excel-merge -- 見積.xlsx 見積-更新.xlsx` を実行すると、端末に「書き換えるファイル」「取り込み元」の絶対パスと「取り込めない違い（1 セル）: 備考!B3（リッチテキスト）」が出て、WinMerge が別の窓で開いた。窓の題は「取り込み先（書き換える）: 見積.xlsx - 取り込み元: 見積-更新.xlsx」で、フォルダーのパスは出なかった。左右とも状態行は「UTF-8 BOM」「Unix」で、右は「RO」だった。差異は 5 件で、`備考` の B3 は左右とも取り込み先の行になっていた
+- 保存せずに窓を閉じると、端末は窓を閉じるまで待ち、「取り込むセルが選ばれていません。取り込み先は変えていません。」で終了コード 0 だった
+- 別の WinMerge(引数なし)を開いたままでも、取り込みの WinMerge は別のプロセスとして開き、その窓を閉じるまで待った(このときの WinMerge の設定は `SingleInstance` が 0)
+- 取り込み先を別のプロセスが書き込みを拒む共有モード(`FileShare.Read`)で開いたままにすると、WinMerge を開く前に「取り込み先を Excel などで開いているなら閉じてからやり直してください」で止まり、終了コード 1 だった
+- 50 万セルのブック(下の表)でも、WinMerge は約 1 秒で窓を開き、「10 件の差異が見つかりました」と出た
+
+### lazygit の専用画面
+
+- Windows の WezTerm(120 列×40 行)と abiko-pi の tmux(160 列×45 行)で、`git excel-merge --tool lazygit -- 見積.xlsx 見積-更新.xlsx` を開き、`002-備考.cells.txt` で `Enter` → `Space` → `X` を押した。どちらも「1 セルを取り込み先へ書き込みました。q で元の画面へ戻ってください。」が出て、`q` で閉じると「1 セルを取り込み先へ書き込みました: …」と終了コード 0 が出た
+- 取り込み先は `備考` の B2 だけが「11 月 15 日」になり、`見積` の B2 は 10 のまま、見出しの A1 は太字と取り込み先の塗り(`FFF2CC`)のままだった。取り込み先のフォルダーに一時ファイルは残らず、一時フォルダー(`excel-merge-*`)も残らなかった
+
+### 大きいブックの時間とメモリ
+
+openpyxl で作った 10 列の表(数値と日本語の文字列)で、列 B の離れた 10 セルを変えた。取り込みの準備(`prepare_merge_session`)と、右のテキストをそのまま左へ写した状態(「すべて左へコピー」して保存したのと同じ)での書き込み(`apply_merge_session`)を、計測用のスクリプトから直接呼んだ(各 1 回、Windows)。WinMerge は、起動から窓の題が出るまでの時間と、そのプロセスのピークのワーキングセット。
+
+| ブック | WinMerge のテキスト | 準備 | 書き込み | WinMerge の窓 | WinMerge のメモリ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10 万セル(0.55 MB) | 2.7 MB | 1.04 秒 | 1.96 秒 | 0.3 秒 | 66 MB |
+| 50 万セル(2.7 MB) | 14.3 MB | 6.16 秒 | 10.59 秒 | 1.0 秒 | 208 MB |
+
+### 見つかった問題と対応
+
+- WinMerge の終了コードを見て止める作りだったが、終了コードは取り込みの結果を表さないので見ないようにした。保存された左のテキストだけで判断する
+- WinMerge を閉じた後に、照合と書き込みでブックを 2 回読んでいた。1 回だけ読むようにした
+- `Zone.Identifier` を読めないファイルシステム(FAT やネットワークの共有など)で、書き込みが止まる作りだった。読めなければ引き継がずに書くようにした
+- この確かめの作業環境は `NO_COLOR=1` を引き継いでいて、そのまま起動した lazygit と delta の画面に色が付かなかった。`NO_COLOR` を外して起動し直すと色が付いた(道具の不具合ではない)
+
+### 分担とレビュー
+
+- AGENTS.md の既定の分担で、Codex が下書きし、Claude Code が確かめて直し、コミットした
+- Grok Build は使用量の残高が尽きていて(HTTP 402)レビューできなかった
+
+### 未確認
+
+- WinMerge の画面で右から左へコピーし、上書き保存して閉じる操作(この確かめでは WinMerge を操作していない)。保存した後のテキストの BOM・改行の形
+- WinMerge の「Allow only one instance to run」を有効にしたときの待ち方
+- 取り込んだブックを Excel 本体で開く試験、macOS
 
 ## Windows 11 での大きいブックの部分ステージの高速化（2026-10-17）
 
