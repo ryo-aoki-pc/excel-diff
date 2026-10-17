@@ -181,7 +181,7 @@ def main():
                 selected_directory = registered.parent
         directory = (selected_directory or default_install_directory()).expanduser().resolve()
         if directory == root or root in directory.parents:
-            raise RuntimeError("--install-dir は同期対象リポジトリの外を指定してください。")
+            raise RuntimeError("--install-dir はこのリポジトリの外を指定してください。")
         source_path = root / "scripts/excel-textconv.py"
         source = source_path.read_bytes()
         helper_source = (root / "scripts/excel-stage.py").read_bytes()
