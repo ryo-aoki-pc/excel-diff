@@ -1,6 +1,6 @@
 """Exercise the public converter and the Git workflows used by lazygit.
 
-Run with: python3 -m unittest discover -s lazygit/tests -v
+Run from the repository root: python3 -B -m unittest discover -s tests -v
 """
 
 import datetime as dt

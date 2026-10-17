@@ -1,6 +1,6 @@
-# Excel の差分表示の注意点
+# excel-diff の注意点
 
-[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-の-excel-差分表示を導入する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-の-excel-差分表示を導入する)・[検証記録](../verification/readme.md)・[表示する内容と自動検証](../excel-diff.md)
+[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・[検証記録](../verification/readme.md)・[表示する内容と自動検証](../reference/readme.md)
 
 ## 注意点
 
