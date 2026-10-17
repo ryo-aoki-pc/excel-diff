@@ -1,6 +1,6 @@
 # excel-diff の注意点とロールバック
 
-[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・[検証記録](../verification/readme.md)・[表示する内容と自動検証](../reference/readme.md)
+[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・[検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)・[表示する内容と自動検証](../reference/readme.md)
 
 ## 注意点
 
@@ -43,7 +43,7 @@ PowerShell の設定は、そのウィンドウで後から実行するコマン
 - 文字ごとに書式を変えたリッチテキストなど対応できないセル内容や、結合セルの左上以外のセルの変更
 - 値や数式の置換で、削除行と追加行の片側だけを選択した場合。対応する両方の行を選択してください
 
-画面を開いた後に対象 Excel の index や作業ファイルが変わった場合も、古い選択を適用せず止まります。閉じて `E` から開き直してください。他ファイルのステージ変更は保持します。ブックを読み取って差分を作る処理は完了まで待つため、大きいブックでは専用画面が開くまで時間がかかります。その間は端末に「Excel を読み込んでいます」と表示します。Windows 11 での例では、50 万セルのブックで `E` を押してから専用画面に差分が出るまで約 13 秒、`X` に 13〜18 秒ほどかかり、メモリは最大で 0.9 GB ほど使いました([検証記録](../verification/readme.md#windows-11-での大きいブックの部分ステージの高速化2026-10-17))。
+画面を開いた後に対象 Excel の index や作業ファイルが変わった場合も、古い選択を適用せず止まります。閉じて `E` から開き直してください。他ファイルのステージ変更は保持します。ブックを読み取って差分を作る処理は完了まで待つため、大きいブックでは専用画面が開くまで時間がかかります。その間は端末に「Excel を読み込んでいます」と表示します。Windows 11 での例では、50 万セルのブックで `E` を押してから専用画面に差分が出るまで約 13 秒、`X` に 13〜18 秒ほどかかり、メモリは最大で 0.9 GB ほど使いました([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#windows-11-での大きいブックの部分ステージの高速化2026-10-17))。
 
 表示確認と部分ステージのために使うスクリプトは、Excel のマクロを実行せず、外部リンクの更新や数式の再計算も行いません。部分ステージしたブックには、次に Excel で開いたときに一度だけ再計算する指定(`fullCalcOnLoad`)を付けます。常に完全再計算する設定(`forceFullCalc`)は付けません。
 
@@ -65,7 +65,7 @@ WinMerge では、取り込むセルの行を右から左へ行ごとにコピ�
 
 WinMerge の比較設定によっては、違いが画面に出ないことがあります。比較の無視設定やフィルターを確かめてください。WinMerge のバックアップ設定によっては、一時フォルダー以外にもセルの値を含むテキストの控えが残ることがあります。扱う値に応じて保存先を確かめてください。
 
-取り込みの準備と書き込みは、ブック全体の読み込み・検証が終わるまで待ちます。大きいブックでは時間とメモリが必要です。Windows 11 での例では、50 万セルのブックで、画面を開くまでの準備に約 6 秒、書き込みに約 11 秒かかり、WinMerge は約 1 秒で窓を開いて 208 MB ほど使いました([検証記録](../verification/readme.md#2-つのブックの取り込み2026-10-18))。
+取り込みの準備と書き込みは、ブック全体の読み込み・検証が終わるまで待ちます。大きいブックでは時間とメモリが必要です。Windows 11 での例では、50 万セルのブックで、画面を開くまでの準備に約 6 秒、書き込みに約 11 秒かかり、WinMerge は約 1 秒で窓を開いて 208 MB ほど使いました([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#2-つのブックの取り込み2026-10-18))。
 
 ファイルは同じフォルダーの一時ファイルから置き換えます。元のモードと、Windows の `Zone.Identifier` は引き継ぎます。Windows の明示的な ACL、`Zone.Identifier` 以外の代替データストリームは引き継ぎません。
 

@@ -60,5 +60,5 @@ lazygit では、Git のリポジトリの中の変更したブックを選ぶ�
 
 - [仕様と検査](docs/reference/readme.md) — 表示する内容・取り込みの仕様・自動検証・macOS の導入
 - [注意点とロールバック](docs/extra/readme.md) — 対応条件と制限・取り込みの注意点・戻す手順
-- [検証記録](docs/verification/readme.md) — 実施日・環境・結果・未確認の範囲
+- [検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)（非公開） — 実施日・環境・結果・未確認の範囲
 - [AGENTS.md](AGENTS.md) — テストのコマンドと、変えるときの決まり
