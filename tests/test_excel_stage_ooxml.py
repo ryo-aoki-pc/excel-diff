@@ -4,9 +4,12 @@ import datetime as dt
 import importlib.util
 import io
 import json
+import random
+from decimal import localcontext
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 import zipfile
 
 from lxml import etree
@@ -78,6 +81,254 @@ def cell_node(root, coordinate):
 
 
 class OoxmlStagingTests(unittest.TestCase):
+    def test_number_fast_path_matches_decimal_at_normalization_boundaries(self):
+        cases = {
+            "0": "0", "-0": "0", "+0.000e30": "0", "0000": "0",
+            "1.230000": "1.23", "-000001.230000": "-1.23",
+            "0.000001000": "0.000001", "0.0000001000": "1E-7",
+            "-0.000001000": "-0.000001", "-0.0000001000": "-1E-7",
+            "999999999999999": "999999999999999",
+            "9999999999999999": "9999999999999999",
+            "1000000000000000": "1000000000000000",
+            "10000000000000000": "1E+16",
+            "-10000000000000000": "-1E+16",
+            "12345678901234567": "12345678901234567",
+            "1234567890123456789.1": "1234567890123456789.1",
+            "10000000000000001": "10000000000000001",
+            "10000000000000010": "1.000000000000001E+16",
+            "1.23456789012345678901234567890": "1.2345678901234567890123456789",
+            "1234500e-10": "0.00012345", "1234500E+10": "1.2345E+16",
+            ".1": "0.1", "1.": "1", "+000001e+000015": "1000000000000000",
+            "1e999999": "1E+999999", "1e-999999": "1E-999999",
+        }
+        with localcontext() as context:
+            context.prec = 6  # Normalization must retain digits beyond context precision.
+            for value, expected in cases.items():
+                with self.subTest(value=value):
+                    self.assertEqual(OOXML._number(value), expected)
+                    self.assertEqual(OOXML._number(value), OOXML._decimal_number(value))
+
+    def test_number_fast_path_matches_decimal_for_random_numeric_spellings(self):
+        randomizer = random.Random(692750)
+        for index in range(5000):
+            digits = "".join(str(randomizer.randrange(10)) for _ in range(randomizer.randrange(1, 81)))
+            point = randomizer.randrange(len(digits) + 1)
+            value = randomizer.choice(("", "+", "-")) + "0" * randomizer.randrange(5)
+            value += digits if index % 3 == 0 else digits[:point] + "." + digits[point:]
+            if index % 2:
+                value += randomizer.choice(("e", "E")) + randomizer.choice(("", "+")) + str(randomizer.randrange(101))
+            elif index % 3:
+                value += "e-" + str(randomizer.randrange(101))
+            with self.subTest(value=value):
+                self.assertEqual(OOXML._number(value), OOXML._decimal_number(value))
+
+    def test_number_decimal_fallback_keeps_additional_spellings_and_errors(self):
+        for value in (" 1.2300 ", "1_000.00", "\u0661\u0662.\u0663\u0660", "1e0000000000000016", "1e1000000", 0.1, 12):
+            with self.subTest(value=value):
+                self.assertEqual(OOXML._number(value), OOXML._decimal_number(value))
+        for value in ("", ".", "++1", "1e", "1..0", "NaN", "sNaN", "Infinity", "-inf", "0e999999999999999999999"):
+            with self.subTest(value=value), self.assertRaises(OOXML.WorkbookError):
+                OOXML._number(value)
+
+    def test_cell_record_fast_path_matches_json_dumps_exactly(self):
+        class UnhashableString(str):
+            __hash__ = None
+
+        values = (
+            "", "日本語", 'quote " backslash \\', "/", "\b\f\n\r\t",
+            "".join(chr(value) for value in range(32)), "\x7f\x85\u2028\u2029",
+            "\U0001f600", "\ud800", "\udfff", "\ud800\udfff",
+            True, False, None, 0, -2, 0.125, ["日本語", None], {"引用符\"": "\\"},
+        )
+        for coordinate in ("A1", "AA2", "XFD1048576"):
+            for kind in ("string", "number", "boolean", "formula", "date", "error", "特殊\"\\\n", UnhashableString("string")):
+                for value in values:
+                    with self.subTest(coordinate=coordinate, kind=kind, value=repr(value)):
+                        expected = json.dumps([coordinate, kind, value], ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                        self.assertEqual(OOXML.cell_record(coordinate, OOXML.Cell(kind, value)), expected)
+            self.assertEqual(OOXML.cell_record(coordinate, None), json.dumps([coordinate, "blank", None], ensure_ascii=False, allow_nan=False, separators=(",", ":")))
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                OOXML.cell_record("A1", OOXML.Cell("number", value))
+        with self.assertRaises(OOXML.WorkbookError):
+            OOXML.cell_record("A0", OOXML.Cell("string", "invalid coordinate"))
+
+    def test_projection_orders_cells_by_numeric_row_and_column(self):
+        base = OOXML.Workbook(book_bytes())
+
+        def change(book):
+            for coordinate in ("A10", "AA2", "B2", "A2"):
+                book["売上"][coordinate] = coordinate
+
+        source = OOXML.Workbook(edit_book(base.data, change))
+        records = [OOXML.parse_record(line)[0] for line in source.projection(base)["1"].splitlines()]
+        self.assertEqual([coordinate for coordinate in records if coordinate in {"A2", "B2", "AA2", "A10"}], ["A2", "B2", "AA2", "A10"])
+
+    def test_streaming_load_rejects_invalid_cells_duplicate_elements_and_dtd(self):
+        original = book_bytes()
+        invalid = (
+            '<sheetData><row r="1"><c r="A0"><v>1</v></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="XFE1"><v>1</v></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1"/><c r="A1"><v>1</v></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1"><v>1</v><v>2</v></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1"><f>1</f><f>2</f></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1" t="inlineStr"><is/><is/></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1" t="s"><v>-1</v></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData>',
+            '<sheetData><row r="1"><c r="A1" t="b"><v>2</v></c></row></sheetData>',
+            '<sheetData/><sheetData/>',
+            '<sheetData/><mergeCells/><mergeCells/>',
+        )
+        for content in invalid:
+            with self.subTest(content=content), self.assertRaises(OOXML.WorkbookError):
+                worksheet = ('<worksheet xmlns="' + NS + '">' + content + '</worksheet>').encode("utf-8")
+                OOXML.Workbook(replace_parts(original, {"xl/worksheets/sheet1.xml": worksheet}))
+        worksheet = ('<!DOCTYPE worksheet [<!ENTITY value "1">]>'
+                     '<worksheet xmlns="' + NS + '"><sheetData><row r="1">'
+                     '<c r="A1"><v>&value;</v></c></row></sheetData></worksheet>').encode("utf-8")
+        with self.assertRaises(OOXML.WorkbookError):
+            OOXML.Workbook(replace_parts(original, {"xl/worksheets/sheet1.xml": worksheet}))
+
+    def test_streaming_load_keeps_unsafe_cells_and_trailing_merge_checks(self):
+        original = book_bytes()
+        cases = (
+            '<c r="A1" cm="1"><v>1</v></c>',
+            '<c r="A1"><v>1</v><extLst/></c>',
+            '<c r="A1" t="unknown"><v>1</v></c>',
+            '<c r="A1"><v>1</v><x:v xmlns:x="urn:extra">2</x:v></c>',
+            '<c r="A1"><f t="shared" ref="A1:B2">1</f><v>1</v></c>',
+            '<c r="A1" t="inlineStr"><is><r><t>rich</t></r></is></c>',
+        )
+        for content in cases:
+            with self.subTest(content=content):
+                worksheet = ('<worksheet xmlns="' + NS + '"><sheetData><row r="1">' + content + '</row></sheetData></worksheet>').encode("utf-8")
+                base = OOXML.Workbook(replace_parts(original, {"xl/worksheets/sheet1.xml": worksheet}))
+                with self.assertRaises(OOXML.WorkbookError):
+                    base.rebuild(base, {("1", "A1")})
+        worksheet = ('<worksheet xmlns="' + NS + '"><sheetData><row r="1">'
+                     '<c r="A1"><v>1</v></c><c r="B1"><v>2</v></c></row></sheetData>'
+                     '<mergeCells><mergeCell ref="A1:B1"/></mergeCells></worksheet>').encode("utf-8")
+        base = OOXML.Workbook(replace_parts(original, {"xl/worksheets/sheet1.xml": worksheet}))
+        with self.assertRaises(OOXML.WorkbookError):
+            base.rebuild(base, {("1", "B1")})
+
+    def test_streaming_load_sorts_unsorted_xml_and_keeps_unusual_namespaces(self):
+        worksheet = ('<worksheet xmlns="' + NS + '" xmlns:x="urn:row" xmlns:y="urn:cell">'
+                     '<sheetData><row r="10"><c r="A10"><v>10</v></c></row>'
+                     '<x:row r="2"><c r="AA2"><v>3</v></c><y:c r="B2"><y:v>2</y:v></y:c>'
+                     '<c r="A2"><v>1</v></c></x:row></sheetData></worksheet>').encode("utf-8")
+        base = OOXML.Workbook(replace_parts(book_bytes(), {"xl/worksheets/sheet1.xml": worksheet}))
+        records = [OOXML.parse_record(line) for line in base.projection()["1"].splitlines()]
+        self.assertEqual(records, [(coordinate, OOXML.Cell("number", value)) for coordinate, value in (
+            ("A2", "1"), ("B2", "2"), ("AA2", "3"), ("A10", "10"),
+        )])
+        with self.assertRaises(OOXML.WorkbookError):
+            base.rebuild(base, {("1", "B2")})
+        self.assertTrue(all(sheet.path not in base._trees for sheet in base.sheets))
+
+    def test_projection_tracks_public_cells_dictionary_key_and_value_changes(self):
+        base = OOXML.Workbook(book_bytes())
+        count = len(base.cells)
+        base.cells[("1", "AA2")] = base.cells.pop(("1", "A1"))
+        base.cells[("1", "B1")] = OOXML.Cell("number", "3")
+        self.assertEqual(len(base.cells), count)
+        records = [OOXML.parse_record(line) for line in base.projection()["1"].splitlines()]
+        expected = [(coordinate, cell) for (identifier, coordinate), cell in sorted(
+            base.cells.items(), key=lambda item: (item[0][0], OOXML.coordinate_key(item[0][1]))
+        ) if identifier == "1"]
+        self.assertEqual(records, expected)
+        base.cells[("1", "A10")] = OOXML.Cell("boolean", True)
+        self.assertIn('["A10","boolean",true]\n', base.projection()["1"])
+        del base.cells[("1", "AA2")]
+        self.assertNotIn('["AA2",', base.projection()["1"])
+
+    def test_rebuild_verification_rejects_wrong_missing_added_and_unselected_cells(self):
+        base = OOXML.Workbook(book_bytes())
+        work = OOXML.Workbook(edit_book(base.data, lambda book: setattr(book["売上"]["A1"], "value", "changed")))
+        original_replace = OOXML.Workbook._replace
+        for corruption in ("wrong", "missing", "added", "unselected"):
+            def broken_replace(book, data, rows, coordinate, cell):
+                if corruption == "wrong":
+                    return
+                original_replace(book, data, rows, coordinate, None if corruption == "missing" else cell)
+                if corruption == "added":
+                    original_replace(book, data, rows, "Z99", OOXML.Cell("number", "1"))
+                elif corruption == "unselected":
+                    original_replace(book, data, rows, "C1", OOXML.Cell("string", "corrupt"))
+
+            with self.subTest(corruption=corruption), mock.patch.object(OOXML.Workbook, "_replace", broken_replace):
+                with self.assertRaises(OOXML.WorkbookError):
+                    base.rebuild(work, {("1", "A1")})
+
+    def test_rebuild_verifies_changed_parts_only_and_keeps_other_sheet_bytes(self):
+        base = OOXML.Workbook(book_bytes())
+        work = OOXML.Workbook(edit_book(base.data, lambda book: setattr(book["売上"]["A1"], "value", "changed")))
+        checked = []
+        original_load = OOXML.Workbook._load_sheet
+
+        def load_sheet(book, sheet, strings, expected=None):
+            checked.append(sheet.id)
+            return original_load(book, sheet, strings, expected)
+
+        with mock.patch.object(OOXML.Workbook, "_load_sheet", load_sheet):
+            result = base.rebuild(work, {("1", "A1")})
+        self.assertEqual(checked, ["1"])
+        self.assertEqual(package(base.data)["xl/worksheets/sheet2.xml"], package(result)["xl/worksheets/sheet2.xml"])
+
+    def test_rebuild_verification_rejects_changes_to_an_unselected_sheet_alias(self):
+        def alias(root):
+            sheets = list(root)
+            sheets[1].set("Target", sheets[0].get("Target"))
+
+        original = edit_xml(book_bytes(), "xl/_rels/workbook.xml.rels", alias)
+        base = OOXML.Workbook(original)
+        work_data = edit_xml(original, "xl/worksheets/sheet1.xml", lambda root: setattr(cell_node(root, "B1").find("{" + NS + "}v"), "text", "200"))
+        work = OOXML.Workbook(work_data)
+        with self.assertRaises(OOXML.WorkbookError):
+            base.rebuild(work, {("1", "B1")})
+        result = OOXML.Workbook(base.rebuild(work, {("1", "B1"), ("2", "B1")}))
+        self.assertEqual(result.cells[("1", "B1")], OOXML.Cell("number", "200"))
+        self.assertEqual(result.cells[("2", "B1")], OOXML.Cell("number", "200"))
+
+    def test_rebuild_verification_keeps_structure_and_checks_untouched_zip_bytes(self):
+        base = OOXML.Workbook(book_bytes())
+        work = OOXML.Workbook(edit_book(base.data, lambda book: setattr(book["売上"]["A1"], "value", "changed")))
+        original_recalculate = OOXML.Workbook._recalculate
+
+        def change_structure(book, updates, removed):
+            original_recalculate(book, updates, removed)
+            root = etree.fromstring(updates[book._workbook_path])
+            root.find("{" + NS + "}sheets/{" + NS + "}sheet").set("name", "corrupt")
+            updates[book._workbook_path] = etree.tostring(root)
+
+        with mock.patch.object(OOXML.Workbook, "_recalculate", change_structure):
+            with self.assertRaises(OOXML.WorkbookError):
+                base.rebuild(work, {("1", "A1")})
+        for corruption in ("remove", "change"):
+            def corrupt_other_sheet(book, updates, removed):
+                original_recalculate(book, updates, removed)
+                other_path = book.sheets[1].path
+                if corruption == "remove":
+                    removed.add(other_path)
+                else:
+                    root = etree.fromstring(book._parts[other_path])
+                    root.find(".//{" + NS + "}t").text = "corrupt"
+                    updates[other_path] = etree.tostring(root)
+
+            with self.subTest(corruption=corruption), mock.patch.object(OOXML.Workbook, "_recalculate", corrupt_other_sheet):
+                with self.assertRaises(OOXML.WorkbookError):
+                    base.rebuild(work, {("1", "A1")})
+        original_write = zipfile.ZipFile.writestr
+
+        def corrupt_part(archive, info, content, *args, **kwargs):
+            if info.filename == "xl/worksheets/sheet2.xml":
+                content += b"<!-- corrupt -->"
+            return original_write(archive, info, content, *args, **kwargs)
+
+        with mock.patch.object(zipfile.ZipFile, "writestr", corrupt_part):
+            with self.assertRaises(OOXML.WorkbookError):
+                base.rebuild(work, {("1", "A1")})
+
     def test_selected_cells_preserve_index_styles_other_cells_and_package_parts(self):
         original = replace_parts(book_bytes(), {
             "xl/vbaProject.bin": b"opaque VBA bytes\x00\xff",

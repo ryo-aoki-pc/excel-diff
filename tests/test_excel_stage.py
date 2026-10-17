@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -439,6 +440,124 @@ class ExcelStageTests(unittest.TestCase):
         self.git("add", "--", sheet["filename"], cwd=picker)
         self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
 
+    def test_apply_uses_saved_projection_and_only_parses_changed_records(self):
+        self.edit({("売上", "A1"): "選ぶ", ("売上", "B1"): 25})
+        session, state = self.prepare()
+        for sheet in state["sheets"]:
+            baseline = session / "baseline" / sheet["filename"]
+            self.assertEqual(baseline.read_bytes(), self.git(
+                "show", "HEAD:" + sheet["filename"], cwd=session / "picker"
+            ))
+        self.assertEqual(set(self.git("ls-files", cwd=session / "picker").decode().splitlines()),
+                         {sheet["filename"] for sheet in state["sheets"]})
+        self.select(session, state, {("売上", "A1")})
+        with mock.patch.object(self.stage.Workbook, "projection", side_effect=AssertionError("projection recomputed")), mock.patch.object(
+            self.stage, "parse_record", wraps=self.stage.parse_record
+        ) as parse:
+            self.assertEqual(self.stage.apply_session(session), 1)
+        self.assertEqual(parse.call_count, 2, "only the baseline and selected version of one replacement need parsing")
+        self.assertEqual(self.staged_values()["売上"]["B1"].value, 10)
+
+    def test_modified_saved_projection_is_rejected(self):
+        self.edit({("売上", "A1"): "選ぶ"})
+        session, state = self.prepare()
+        self.select(session, state, {("売上", "A1")})
+        sheet = state["sheets"][0]
+        (session / "baseline" / sheet["filename"]).write_bytes(
+            self.git("show", ":" + sheet["filename"], cwd=session / "picker")
+        )
+        self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
+
+    def test_legacy_session_requests_reopening_instead_of_a_key_error(self):
+        self.edit({("売上", "A1"): "変更後"})
+        session, state = self.prepare()
+        state.pop("base_sha256")
+        for sheet in state["sheets"]:
+            sheet.pop("baseline_sha256")
+        self.stage.write_json(session / "session.json", state)
+        with self.assertRaisesRegex(self.stage.StageError, "画面を閉じて選び直してください"):
+            self.stage.apply_session(session)
+        base = self.stage.Workbook((session / "base.xlsx").read_bytes())
+        work = self.stage.Workbook((session / "work.xlsx").read_bytes())
+        with self.assertRaisesRegex(self.stage.StageError, "画面を閉じて選び直してください"):
+            self.stage.selected_cells(session, state, base, work)
+
+    def test_changed_workbook_snapshots_are_rejected(self):
+        self.edit({("売上", "A1"): "選ぶ"})
+        for snapshot in ("base.xlsx", "work.xlsx"):
+            with self.subTest(snapshot=snapshot):
+                session = self.directory / snapshot
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                self.select(session, state, {("売上", "A1")})
+                self.edit({("売上", "B1"): 999}, path=session / snapshot)
+                self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
+
+    def test_selected_cells_checks_compatibility_without_any_selected_records(self):
+        session, state = self.prepare()
+        base = self.stage.Workbook((session / "base.xlsx").read_bytes())
+        book = load_workbook(session / "work.xlsx")
+        book["備考"].title = "別のシート名"
+        book.save(session / "work.xlsx")
+        book.close()
+        work = self.stage.Workbook((session / "work.xlsx").read_bytes())
+        with self.assertRaises(ValueError):
+            self.stage.selected_cells(session, state, base, work)
+
+    def test_same_length_reordered_or_readdressed_records_are_rejected(self):
+        self.edit({("売上", "A1"): "変更後"})
+        for malformed in ("reordered", "readdressed"):
+            with self.subTest(malformed=malformed):
+                session = self.directory / malformed
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                sheet = next(sheet for sheet in state["sheets"] if sheet["name"] == "売上")
+                picker = session / "picker"
+                path = picker / sheet["filename"]
+                lines = self.git("show", "HEAD:" + sheet["filename"], cwd=picker).decode().splitlines()
+                if malformed == "reordered":
+                    lines[0], lines[1] = lines[1], lines[0]
+                else:
+                    record = json.loads(lines[0])
+                    record[0] = "A2"
+                    lines[0] = json.dumps(record, ensure_ascii=False)
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                self.git("add", "--", sheet["filename"], cwd=picker)
+                self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
+
+    def test_picker_file_additions_deletions_and_conflicts_are_rejected(self):
+        self.edit({("売上", "A1"): "変更後"})
+        for malformed in ("added", "deleted", "conflict"):
+            with self.subTest(malformed=malformed):
+                session = self.directory / malformed
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                sheet = state["sheets"][0]
+                picker = session / "picker"
+                if malformed == "added":
+                    (picker / "extra.cells.txt").write_bytes(b"[]\n")
+                    self.git("add", "--", "extra.cells.txt", cwd=picker)
+                elif malformed == "deleted":
+                    self.git("rm", "--force", "--", sheet["filename"], cwd=picker)
+                else:
+                    oid = self.git("rev-parse", "HEAD:" + sheet["filename"], cwd=picker).decode().strip()
+                    self.git("update-index", "--force-remove", "--", sheet["filename"], cwd=picker)
+                    rows = "".join("100644 {} {}\t{}\n".format(oid, stage, sheet["filename"]) for stage in (1, 2, 3))
+                    self.git("update-index", "--index-info", input=rows.encode(), cwd=picker)
+                self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
+
+    def test_unchanged_unicode_record_separators_keep_existing_rejection(self):
+        for number, separator in enumerate(("\x85", "\u2028", "\u2029")):
+            with self.subTest(separator=repr(separator)):
+                self.edit({("備考", "B4"): "前" + separator + "後"})
+                self.git("add", "--", self.path.name)
+                session = self.directory / ("separator-" + str(number))
+                self.stage.prepare_session(self.repo, self.path.name, session)
+                self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
+
+    def test_record_line_iterator_matches_splitlines_across_chunk_boundaries(self):
+        for text in ("", "\n", "A\nB\n", "A" * 65535 + "\r\nB\rC\n",
+                     "A" * 65535 + "\u2028B\x85C\u2029D\vE\fF\x1cG\x1dH\x1eI"):
+            with self.subTest(length=len(text)):
+                self.assertEqual(list(self.stage._record_lines(text.encode("utf-8"))), text.splitlines())
+
     def test_unsupported_and_new_files_require_whole_file_staging(self):
         for extension in (".xls", ".xlt", ".txt"):
             with self.subTest(extension=extension):
@@ -543,6 +662,162 @@ class ExcelStageTests(unittest.TestCase):
         self.assertFalse(staged.font.italic)
         self.assertEqual(staged.font.color.rgb, "00FF0000")
         self.assertEqual(staged.fill.fgColor.rgb, "00FFFF00")
+
+
+class SessionCleanupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scripts_path = str(SCRIPT.parent)
+        sys.path.insert(0, cls.scripts_path)
+        spec = importlib.util.spec_from_file_location("excel_stage_cleanup", SCRIPT)
+        cls.stage = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cls.stage
+        spec.loader.exec_module(cls.stage)
+
+    @classmethod
+    def tearDownClass(cls):
+        sys.path.remove(cls.scripts_path)
+        sys.modules.pop("excel_stage_cleanup", None)
+
+    def test_cleanup_retries_permission_errors_then_succeeds(self):
+        directory = Path("temporary-session")
+        errors = io.StringIO()
+        with mock.patch.object(self.stage.shutil, "rmtree", side_effect=[
+            PermissionError("busy"), PermissionError("busy"), None
+        ]) as remove, mock.patch.object(self.stage.time, "sleep") as sleep, mock.patch.object(
+            self.stage.sys, "stderr", errors
+        ):
+            self.assertTrue(self.stage.cleanup_session(directory, retries=2, delay=0.25))
+        self.assertEqual(remove.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
+        self.assertEqual(errors.getvalue(), "")
+
+    def test_cleanup_stops_after_retry_limit_and_warns(self):
+        directory = Path("temporary-session")
+        errors = io.StringIO()
+        with mock.patch.object(self.stage.shutil, "rmtree", side_effect=PermissionError("busy")) as remove, mock.patch.object(
+            self.stage.time, "sleep"
+        ), mock.patch.object(self.stage.sys, "stderr", errors):
+            self.assertFalse(self.stage.cleanup_session(directory, retries=2, delay=0))
+        self.assertEqual(remove.call_count, 3)
+        self.assertIn("一時フォルダーを消せませんでした", errors.getvalue())
+        self.assertIn(str(directory), errors.getvalue())
+
+    def test_cleanup_treats_a_missing_directory_as_success(self):
+        with tempfile.TemporaryDirectory(prefix="excel-stage-cleanup-") as temporary:
+            directory = Path(temporary) / "missing-session"
+            errors = io.StringIO()
+            with mock.patch.object(self.stage.time, "sleep") as sleep, mock.patch.object(self.stage.sys, "stderr", errors):
+                self.assertTrue(self.stage.cleanup_session(directory, retries=2, delay=0))
+            sleep.assert_not_called()
+            self.assertEqual(errors.getvalue(), "")
+
+    def test_cleanup_does_not_retry_other_os_errors(self):
+        directory = Path("temporary-session")
+        errors = io.StringIO()
+        with mock.patch.object(self.stage.shutil, "rmtree", side_effect=OSError("device error")) as remove, mock.patch.object(
+            self.stage.time, "sleep"
+        ) as sleep, mock.patch.object(self.stage.sys, "stderr", errors):
+            self.assertFalse(self.stage.cleanup_session(directory, retries=20, delay=0))
+        remove.assert_called_once()
+        sleep.assert_not_called()
+        self.assertIn("一時フォルダーを消せませんでした", errors.getvalue())
+        self.assertIn(str(directory), errors.getvalue())
+
+    def test_cleanup_removes_an_actual_read_only_file(self):
+        with tempfile.TemporaryDirectory(prefix="excel-stage-cleanup-") as temporary:
+            directory = Path(temporary) / "session"
+            directory.mkdir()
+            path = directory / "readonly.txt"
+            path.write_bytes(b"read-only session file")
+            path.chmod(stat.S_IREAD)
+            self.assertTrue(self.stage.cleanup_session(directory, retries=0, delay=0))
+            self.assertFalse(directory.exists())
+
+    def run_main(self, applied=True, picker_status=0, removal_error=None, prepare_error=None):
+        with tempfile.TemporaryDirectory(prefix="excel-stage-main-") as temporary:
+            directory = Path(temporary) / "session"
+            directory.mkdir()
+            output, errors = io.StringIO(), io.StringIO()
+
+            def prepare(repo, relative, session, progress=None):
+                self.assertEqual(Path(session), directory)
+                if prepare_error is not None:
+                    raise prepare_error
+                self.stage.write_json(directory / "session.json", {"applied": False})
+
+            def pick(session):
+                self.assertEqual(Path(session), directory)
+                state_path = directory / "session.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertFalse(state["applied"], "prepare must leave an unapplied session")
+                state["applied"] = applied
+                self.stage.write_json(state_path, state)
+                return picker_status
+
+            git_result = subprocess.CompletedProcess([], 0, stdout=str(Path(temporary)).encode("utf-8") + b"\n")
+            with mock.patch.object(self.stage, "check_tools"), mock.patch.object(
+                self.stage, "git", return_value=git_result
+            ), mock.patch.object(self.stage.tempfile, "mkdtemp", return_value=str(directory)), mock.patch.object(
+                self.stage, "prepare_session", side_effect=prepare
+            ), mock.patch.object(self.stage, "run_picker", side_effect=pick) as picker, mock.patch.object(
+                self.stage, "cleanup_session", wraps=self.stage.cleanup_session
+            ) as cleanup, mock.patch.object(self.stage.shutil, "rmtree", wraps=self.stage.shutil.rmtree,
+                                           side_effect=removal_error) as remove, mock.patch.object(
+                self.stage.time, "sleep"
+            ), mock.patch.object(self.stage.sys, "stdout", output), mock.patch.object(self.stage.sys, "stderr", errors):
+                result = self.stage.main(["book.xlsx"])
+            cleanup.assert_called_once_with(directory)
+            return result, output.getvalue(), errors.getvalue(), directory.exists(), picker.call_count, remove.call_count, str(directory)
+
+    def test_successful_apply_keeps_success_when_cleanup_stays_busy(self):
+        result, output, errors, exists, _, attempts, directory = self.run_main(removal_error=PermissionError("busy"))
+        self.assertEqual(result, 0)
+        self.assertIn("Excel の部分ステージを反映しました。", output)
+        self.assertIn("一時フォルダーを消せませんでした", errors)
+        self.assertIn(directory, errors)
+        self.assertNotIn("Excel の部分ステージに失敗しました", errors)
+        self.assertTrue(exists)
+        self.assertEqual(attempts, 21)
+
+    def test_successful_apply_cleans_up_without_warning(self):
+        result, output, errors, exists, _, _, _ = self.run_main()
+        self.assertEqual(result, 0)
+        self.assertIn("Excel の部分ステージを反映しました。", output)
+        self.assertEqual(errors, "")
+        self.assertNotIn("Excel の部分ステージに失敗しました", errors)
+        self.assertFalse(exists)
+
+    def test_cancel_preserves_picker_status_when_cleanup_stays_busy(self):
+        result, output, errors, exists, _, attempts, directory = self.run_main(
+            applied=False, picker_status=7, removal_error=PermissionError("busy")
+        )
+        self.assertEqual(result, 7)
+        self.assertIn("選択を取り消しました。", output)
+        self.assertIn("一時フォルダーを消せませんでした", errors)
+        self.assertIn(directory, errors)
+        self.assertNotIn("Excel の部分ステージに失敗しました", errors)
+        self.assertTrue(exists)
+        self.assertEqual(attempts, 21)
+
+    def test_prepare_failure_also_cleans_up_and_reports_failure(self):
+        for removal_error in (None, PermissionError("busy")):
+            with self.subTest(cleanup_fails=removal_error is not None):
+                result, _, errors, exists, picker_calls, attempts, directory = self.run_main(
+                    removal_error=removal_error, prepare_error=self.stage.StageError("prepare failed")
+                )
+                self.assertEqual(result, 1)
+                self.assertIn("Excel の部分ステージに失敗しました", errors)
+                self.assertIn("prepare failed", errors)
+                self.assertEqual(picker_calls, 0)
+                if removal_error is None:
+                    self.assertFalse(exists)
+                    self.assertNotIn("一時フォルダーを消せませんでした", errors)
+                else:
+                    self.assertTrue(exists)
+                    self.assertEqual(attempts, 21)
+                    self.assertIn("一時フォルダーを消せませんでした", errors)
+                    self.assertIn(directory, errors)
 
 
 if __name__ == "__main__":
