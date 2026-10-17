@@ -51,6 +51,7 @@ openpyxl で作った 10 列の表(数値と日本語の文字列)で、列 B �
 ### 分担とレビュー
 
 - AGENTS.md の既定の分担で、Codex が下書きし、Claude Code が確かめて直し、コミットした
+- Antigravity CLI(Gemini 3.8 Flash High)は読み取り専用のレビューで指摘なしだった。独立したリポジトリにする前の Pull Request のレビューでは 3 件の指摘があり、導入先がリポジトリの中のときの文言を直した(既定の導入先のテストはこの Pull Request で足した。テストの docstring の「lazygit」は、テストが lazygit の使い方を確かめているので残した)
 - Grok Build は使用量の残高が尽きていて(HTTP 402)レビューできなかった
 
 ### 未確認
