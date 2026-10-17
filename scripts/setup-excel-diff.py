@@ -12,6 +12,8 @@ import venv
 from pathlib import Path
 
 
+# Keep these markers unchanged: a reinstall must recognize blocks that
+# earlier setups already appended, instead of adding a second one.
 ATTRIBUTE_BLOCK = (
     "# BEGIN lazygit Excel textconv (setup-excel-diff.py)\n"
     "*.[xX][lL][sS][xX] diff=excel\n"
@@ -36,7 +38,7 @@ def default_install_directory():
         base = Path.home() / "Library/Application Support"
     else:
         base = xdg_directory("XDG_DATA_HOME", Path.home() / ".local/share")
-    return base / "lazygit-excel-diff"
+    return base / "excel-diff"
 
 
 def git_values(key, path=False, scope="global"):
@@ -166,7 +168,7 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", type=Path,
-                        help="仮想環境と Excel 用スクリプトの保存先 (同期対象リポジトリの外)")
+                        help="仮想環境と Excel 用スクリプトの保存先 (既定: ユーザーのデータ領域の excel-diff。リポジトリの外)")
     parser.add_argument("--check", action="store_true", help="設定を変更せず、インストール状態を確認する")
     args = parser.parse_args()
     try:

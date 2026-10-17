@@ -1,6 +1,6 @@
 # Excel の差分表示の仕様と検査
 
-導入と使い方の手順は setup-notes の[lazygit の Excel 差分表示を導入する](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-の-excel-差分表示を導入する)（Windows 11 は[同名の項](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-の-excel-差分表示を導入する)）と、その後ろの項にある。この文書には、表示する内容・自動検証・macOS の導入を置く。対応条件と制限は[注意点](extra/excel-diff.md)。
+導入と使い方の手順は setup-notes の[excel-diff を導入・更新する](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)（Windows 11 は[同名の項](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)）と、その後ろの項にある。この文書には、表示する内容・自動検証・macOS の導入を置く。対応条件と制限は[注意点](../extra/readme.md)。
 
 ## 表示する内容
 
@@ -30,13 +30,13 @@
 Linux:
 
 ```sh
-"${XDG_DATA_HOME:-$HOME/.local/share}/lazygit-excel-diff/venv/bin/python" -B -m unittest discover -s tests -v
+"${XDG_DATA_HOME:-$HOME/.local/share}/excel-diff/venv/bin/python" -B -m unittest discover -s tests -v
 ```
 
 Windows(PowerShell):
 
 ```powershell
-& "$env:LOCALAPPDATA\lazygit-excel-diff\venv\Scripts\python.exe" -B -m unittest discover -s tests -v
+& "$env:LOCALAPPDATA\excel-diff\venv\Scripts\python.exe" -B -m unittest discover -s tests -v
 ```
 
 ## macOS の導入

@@ -1,0 +1,8 @@
+# Python の実行時キャッシュ
+__pycache__/
+
+# Claude Code のローカル設定
+.claude/
+
+# Syncthing の同期マーカー
+.stfolder/
