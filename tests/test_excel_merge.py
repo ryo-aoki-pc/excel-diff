@@ -119,32 +119,39 @@ class ExcelMergeTests(unittest.TestCase):
         state = self.stage.prepare_merge_session(self.target, self.source, directory, tool=tool)
         return directory, state
 
-    def select(self, directory, state, selected):
+    def select(self, directory, state, selected=(), formats=()):
         # Match test_excel_stage.py: stage complete record replacements only.
         picker = directory / "picker"
         for sheet in state["sheets"]:
-            filename = sheet["filename"]
-            baseline = self.git("show", "HEAD:" + filename, cwd=picker).decode("utf-8")
-            working = (picker / filename).read_text(encoding="utf-8")
-            replacements = {json.loads(line)[0]: line for line in working.splitlines()
-                            if (sheet["name"], json.loads(line)[0]) in selected}
-            result = [replacements.get(json.loads(line)[0], line) for line in baseline.splitlines()]
-            (picker / filename).write_text("\n".join(result) + "\n", encoding="utf-8")
-            self.git("add", "--", filename, cwd=picker)
+            for key, selection in (("filename", selected), ("formats_filename", formats)):
+                filename = sheet[key]
+                baseline = self.git("show", "HEAD:" + filename, cwd=picker).decode("utf-8")
+                working = (picker / filename).read_text(encoding="utf-8")
+                # Blank lines separate format records and are never replaced.
+                replacements = {json.loads(line)[0]: line for line in working.splitlines()
+                                if line and (sheet["name"], json.loads(line)[0]) in selection}
+                result = [replacements.get(json.loads(line)[0], line) if line else line for line in baseline.splitlines()]
+                (picker / filename).write_text("\n".join(result) + ("\n" if result else ""), encoding="utf-8")
+                self.git("add", "--", filename, cwd=picker)
 
     def win_paths(self, directory, state):
         return tuple(directory / state["winmerge"][key] for key in ("left", "right", "baseline"))
 
-    def copied_lines(self, directory, state, selected=None):
+    def copied_lines(self, directory, state, selected=None, formats=()):
         left, right, _ = self.win_paths(directory, state)
         baseline = left.read_text(encoding="utf-8-sig").splitlines()
         changed = right.read_text(encoding="utf-8-sig").splitlines()
-        sheet_name = None
+        sheet_name, format_section = None, False
         for index, line in enumerate(baseline):
             if line.startswith("# シート "):
                 sheet_name = json.loads(line.split(": ", 1)[1])
-            elif line.startswith("[") and (selected is None or (sheet_name, json.loads(line)[0]) in selected):
-                baseline[index] = changed[index]
+                format_section = False
+            elif line.startswith("# 書式 シート "):
+                format_section = True
+            elif line.startswith("["):
+                selection = formats if format_section else selected
+                if selection is None or (sheet_name, json.loads(line)[0]) in selection:
+                    baseline[index] = changed[index]
         return baseline
 
     def run_win(self, directory, state, edit=None):
@@ -167,8 +174,9 @@ class ExcelMergeTests(unittest.TestCase):
         directory, state = self.prepare("winmerge")
         lines = self.copied_lines(directory, state, selected)
         chosen, launched = self.run_win(directory, state, lambda _: (separator.join(lines) + final).encode(encoding))
-        self.assertEqual(len(chosen), len(selected) if selected is not None else 5)
-        self.assertEqual(self.stage.apply_merge_session(directory), len(chosen))
+        self.assertEqual(len(chosen.values), len(selected) if selected is not None else 5)
+        self.assertEqual(chosen.formats, set())
+        self.assertEqual(self.stage.apply_merge_session(directory), (len(chosen.values), 0))
         return directory, state, launched
 
     def assert_unchanged_failure(self, operation, pattern=None):
@@ -198,11 +206,18 @@ class ExcelMergeTests(unittest.TestCase):
         self.assertEqual(state["source"], str(self.source.resolve()))
         self.assertFalse(state["applied"])
         self.assertEqual(state["differences"], 5)
+        self.assertEqual(state["format_differences"], 0)
+        self.assertEqual(state["selectable"], 5)
         self.assertEqual(state["unsupported"], [])
         self.assertEqual((directory / "base.xlsx").read_bytes(), snapshots[0][0])
         self.assertEqual((directory / "work.xlsx").read_bytes(), snapshots[1][0])
         base, source = self.stage.Workbook(snapshots[0][0]), self.stage.Workbook(snapshots[1][0])
+        format_base, format_source, _ = base.compare_formats(source).projection()
         for sheet in state["sheets"]:
+            self.assertEqual(self.git("show", "HEAD:" + sheet["formats_filename"], cwd=directory / "picker").decode(),
+                             format_base[sheet["id"]])
+            self.assertEqual((directory / "picker" / sheet["formats_filename"]).read_text(encoding="utf-8"),
+                             format_source[sheet["id"]])
             self.assertEqual(self.git("show", "HEAD:" + sheet["filename"], cwd=directory / "picker").decode(),
                              base.projection(source)[sheet["id"]])
             self.assertEqual((directory / "picker" / sheet["filename"]).read_text(encoding="utf-8"),
@@ -210,19 +225,258 @@ class ExcelMergeTests(unittest.TestCase):
         self.assertEqual(self.git("log", "-1", "--format=%s", cwd=directory / "picker").decode().strip(), "取り込み先の Excel")
         self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in (self.target, self.source)], snapshots)
 
-    def test_formatting_only_difference_does_not_open_a_picker(self):
-        self.source.write_bytes(self.target.read_bytes())
+    def test_formatting_only_difference_opens_picker_and_imports(self):
+        original = self.target.read_bytes()
+        original_run = subprocess.run
+        for tool in ("lazygit", "winmerge"):
+            with self.subTest(tool=tool):
+                self.target.write_bytes(original)
+                self.source.write_bytes(original)
+                book = load_workbook(self.source)
+                book["売上"]["A1"].font = Font(italic=True, color="0000FF")
+                book.save(self.source)
+                book.close()
+                opened = []
+
+                def picker(directory, merge=False):
+                    opened.append("lazygit")
+                    self.assertTrue(merge)
+                    state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+                    self.assertEqual((state["differences"], state["format_differences"], state["selectable"]), (0, 1, 1))
+                    self.select(directory, state, formats={("売上", "A1")})
+                    self.assertEqual(self.stage.apply_merge_session(directory), (0, 1))
+                    return 0
+
+                def launch(command, *args, **kwargs):
+                    if command[0] != "WinMergeU.exe":
+                        return original_run(command, *args, **kwargs)
+                    opened.append("winmerge")
+                    directory = Path(command[-2]).parent.parent
+                    state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+                    self.assertEqual((state["differences"], state["format_differences"], state["selectable"]), (0, 1, 1))
+                    left, _, _ = self.win_paths(directory, state)
+                    lines = self.copied_lines(directory, state, (), {("売上", "A1")})
+                    left.write_bytes(("\n".join(lines) + "\n").encode("utf-8-sig"))
+                    return subprocess.CompletedProcess(command, 0)
+
+                output, errors = io.StringIO(), io.StringIO()
+                with mock.patch.object(self.stage, "choose_tool", return_value=tool), mock.patch.object(
+                    self.stage, "check_tools"
+                ), mock.patch.object(self.stage, "run_picker", side_effect=picker), mock.patch.object(
+                    self.stage, "find_winmerge", return_value="WinMergeU.exe"
+                ), mock.patch.object(self.stage.subprocess, "run", side_effect=launch), mock.patch.object(
+                    self.stage.sys, "stdout", output
+                ), mock.patch.object(self.stage.sys, "stderr", errors):
+                    status = self.stage.main(["--merge", str(self.target), str(self.source)])
+                self.assertEqual(status, 0, errors.getvalue())
+                self.assertEqual(opened, [tool])
+                self.assertIn("書式 1 セルを取り込み先へ書き込みました:", output.getvalue())
+                book = load_workbook(self.target)
+                self.assertEqual(book["売上"]["A1"].value, "元の値")
+                self.assertTrue(book["売上"]["A1"].font.italic)
+                self.assertEqual(book["売上"]["A1"].font.color.rgb, "000000FF")
+                book.close()
+
+    def test_value_and_format_of_the_same_cell_can_be_imported_independently(self):
+        original = self.target.read_bytes()
+        book = load_workbook(self.source)
+        book["売上"]["A1"].font = Font(italic=True, color="0000FF")
+        book.save(self.source)
+        book.close()
+        with zipfile.ZipFile(self.target) as target, zipfile.ZipFile(self.source) as source:
+            self.assertNotEqual(target.read("xl/styles.xml"), source.read("xl/styles.xml"))
+        for tool in ("lazygit", "winmerge"):
+            for values, formats in ((True, False), (False, True), (True, True)):
+                with self.subTest(tool=tool, values=values, formats=formats):
+                    self.target.write_bytes(original)
+                    directory, state = self.prepare(tool)
+                    value_keys = {("売上", "A1")} if values else set()
+                    format_keys = {("売上", "A1")} if formats else set()
+                    if tool == "lazygit":
+                        self.select(directory, state, value_keys, format_keys)
+                    else:
+                        left, _, _ = self.win_paths(directory, state)
+                        lines = self.copied_lines(directory, state, value_keys, format_keys)
+                        left.write_bytes(("\n".join(lines) + "\n").encode("utf-8-sig"))
+                    self.assertEqual(self.stage.apply_merge_session(directory), (int(values), int(formats)))
+                    applied = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+                    self.assertEqual((applied["count"], applied["format_count"]), (int(values), int(formats)))
+                    book = load_workbook(self.target)
+                    cell = book["売上"]["A1"]
+                    self.assertEqual(cell.value, "新しい値" if values else "元の値")
+                    self.assertEqual(cell.font.italic, formats)
+                    self.assertEqual(cell.font.bold, not formats)
+                    self.assertEqual(book["売上"]["B1"].value, 10)
+                    self.assertEqual(cell.fill.fgColor.rgb, "00FFFF00")
+                    book.close()
+
+    def test_winmerge_format_sections_follow_values_and_have_aligned_rows(self):
         book = load_workbook(self.source)
         book["売上"]["A1"].font = Font(italic=True)
         book.save(self.source)
         book.close()
-        before = self.target.read_bytes(), self.target.stat().st_mtime_ns
-        status, output, errors, _, lazy, win = self.main([str(self.target), str(self.source)])
-        self.assertEqual(status, 0, errors)
-        self.assertIn("差分がありません。取り込み先は変えていません。", output)
-        lazy.assert_not_called()
-        win.assert_not_called()
-        self.assertEqual((self.target.read_bytes(), self.target.stat().st_mtime_ns), before)
+        directory, state = self.prepare("winmerge")
+        left, right, _ = self.win_paths(directory, state)
+        before = left.read_text(encoding="utf-8-sig").splitlines()
+        after = right.read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(len(before), len(after))
+        heading = '# 書式 シート 1: "売上"'
+        index = before.index(heading)
+        self.assertEqual(after[index], heading)
+        self.assertTrue(all(json.loads(line)[1] != "format" for line in before[3:index]))
+        self.assertEqual(json.loads(before[index + 1])[:2], ["A1", "format"])
+        self.assertEqual(before[index + 2], '# シート 2: "備考"')
+        self.assertFalse(any(line.startswith("# 書式 シート 2:") for line in before))
+        self.assertEqual((state["differences"], state["format_differences"], state["selectable"]), (5, 1, 6))
+
+    def test_winmerge_invalid_format_copies_are_rejected(self):
+        book = load_workbook(self.source)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.source)
+        book.close()
+        for change in ("value-section", "description", "removed-heading"):
+            with self.subTest(change=change):
+                directory, state = self.prepare("winmerge")
+                left, right, _ = self.win_paths(directory, state)
+                lines = left.read_text(encoding="utf-8-sig").splitlines()
+                changed = right.read_text(encoding="utf-8-sig").splitlines()
+                heading = next(index for index, line in enumerate(lines) if line.startswith("# 書式 シート "))
+                if change == "value-section":
+                    first = next(index for index, line in enumerate(lines) if line.startswith("["))
+                    lines[first] = changed[heading + 1]
+                elif change == "description":
+                    record = json.loads(changed[heading + 1])
+                    record[2] += "、手で打った説明"
+                    lines[heading + 1] = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                else:
+                    del lines[heading]
+                data = ("\n".join(lines) + "\n").encode("utf-8-sig")
+                self.assert_unchanged_failure(lambda: self.run_win(directory, state, lambda _: data))
+
+    def test_winmerge_format_records_are_separated_by_unchanged_blank_lines(self):
+        book = load_workbook(self.source)
+        book["売上"]["A1"].font = Font(italic=True)
+        book["売上"]["Z9"].fill = PatternFill("solid", fgColor="FFFFFF00")
+        book.save(self.source)
+        book.close()
+        for change in ("copied-into-blank", "removed-blank"):
+            with self.subTest(change=change):
+                directory, state = self.prepare("winmerge")
+                left, right, _ = self.win_paths(directory, state)
+                lines = left.read_text(encoding="utf-8-sig").splitlines()
+                changed = right.read_text(encoding="utf-8-sig").splitlines()
+                heading = next(index for index, line in enumerate(lines) if line.startswith("# 書式 シート "))
+                self.assertEqual([line[:6] for line in lines[heading + 1:heading + 4]], ['["A1",', "", '["Z9",'])
+                self.assertEqual(changed[heading + 2], "")
+                if change == "copied-into-blank":
+                    lines[heading + 2] = changed[heading + 1]
+                else:
+                    del lines[heading + 2]
+                data = ("\n".join(lines) + "\n").encode("utf-8-sig")
+                self.assert_unchanged_failure(lambda: self.run_win(directory, state, lambda _: data))
+        directory, state = self.prepare("winmerge")
+        chosen, _ = self.run_win(directory, state, lambda _: ("\n".join(self.copied_lines(directory, state, set(), {("売上", "Z9")})) + "\n").encode("utf-8-sig"))
+        self.assertEqual(chosen, (set(), {(state["sheets"][0]["id"], "Z9")}))
+        self.assertEqual(self.stage.apply_merge_session(directory), (0, 1))
+        result = load_workbook(self.target)
+        # An existing fill that differs only in alpha is reused.
+        self.assertEqual(result["売上"]["Z9"].fill.fgColor.rgb[-6:], "FFFF00")
+        self.assertFalse(result["売上"]["A1"].font.italic)
+        result.close()
+
+    def test_unsupported_formats_are_hidden_and_reasons_are_combined_per_cell(self):
+        book = load_workbook(self.source)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.source)
+        book.close()
+        rich_cell(self.source)
+        with zipfile.ZipFile(self.source) as archive:
+            styles = ET.fromstring(archive.read("xl/styles.xml"))
+            sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        index = int(sheet.find(".//{" + NS + "}c[@r='A1']").get("s"))
+        xf = styles.find("{" + NS + "}cellXfs")[index]
+        ET.SubElement(xf, "{" + NS + "}extLst")
+        self.source.write_bytes(replace_parts(self.source.read_bytes(), {
+            "xl/styles.xml": ET.tostring(styles, encoding="utf-8")
+        }))
+        for tool in ("lazygit", "winmerge"):
+            with self.subTest(tool=tool):
+                directory, state = self.prepare(tool)
+                reasons = [item for item in state["unsupported"] if item["coordinate"] == "A1"]
+                self.assertEqual(len(reasons), 1)
+                self.assertIn("リッチテキスト", reasons[0]["reason"])
+                self.assertIn("・", reasons[0]["reason"])
+                self.assertIn("書式", reasons[0]["reason"])
+                self.assertEqual((state["differences"], state["format_differences"], state["selectable"]), (5, 1, 4))
+                if tool == "lazygit":
+                    sheet = state["sheets"][0]
+                    before = self.git("show", "HEAD:" + sheet["formats_filename"], cwd=directory / "picker").decode()
+                    after = (directory / "picker" / sheet["formats_filename"]).read_text(encoding="utf-8")
+                else:
+                    left, right, _ = self.win_paths(directory, state)
+                    before = next(line for line in left.read_text(encoding="utf-8-sig").splitlines()
+                                  if line.startswith('["A1","format",'))
+                    after = next(line for line in right.read_text(encoding="utf-8-sig").splitlines()
+                                 if line.startswith('["A1","format",'))
+                self.assertEqual(before, after)
+
+    def test_unsupported_value_does_not_prevent_importing_its_cell_format(self):
+        original = self.target.read_bytes()
+        self.source.write_bytes(original)
+        book = load_workbook(self.source)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.source)
+        book.close()
+        rich_cell(self.source)
+        for tool in ("lazygit", "winmerge"):
+            with self.subTest(tool=tool):
+                self.target.write_bytes(original)
+                directory, state = self.prepare(tool)
+                self.assertEqual((state["differences"], state["format_differences"], state["selectable"]), (1, 1, 1))
+                if tool == "lazygit":
+                    self.select(directory, state, formats={("売上", "A1")})
+                else:
+                    left, _, _ = self.win_paths(directory, state)
+                    lines = self.copied_lines(directory, state, (), {("売上", "A1")})
+                    left.write_bytes(("\n".join(lines) + "\n").encode("utf-8-sig"))
+                self.assertEqual(self.stage.apply_merge_session(directory), (0, 1))
+                book = load_workbook(self.target)
+                self.assertEqual(book["売上"]["A1"].value, "元の値")
+                self.assertTrue(book["売上"]["A1"].font.italic)
+                book.close()
+
+    def test_blank_cells_and_inherited_formats_can_be_imported(self):
+        book = load_workbook(self.target)
+        book["売上"].row_dimensions[4].font = Font(bold=True)
+        book.save(self.target)
+        book.close()
+        original = self.target.read_bytes()
+        self.source.write_bytes(original)
+        book = load_workbook(self.source)
+        book["売上"]["A4"] = "追加"
+        book["売上"]["H3"].fill = PatternFill("solid", fgColor="00FF00")
+        book.save(self.source)
+        book.close()
+        for tool in ("lazygit", "winmerge"):
+            with self.subTest(tool=tool):
+                self.target.write_bytes(original)
+                directory, state = self.prepare(tool)
+                self.assertEqual((state["differences"], state["format_differences"]), (1, 2))
+                formats = {("売上", "A4"), ("売上", "H3")}
+                if tool == "lazygit":
+                    self.select(directory, state, formats=formats)
+                else:
+                    left, _, _ = self.win_paths(directory, state)
+                    lines = self.copied_lines(directory, state, (), formats)
+                    left.write_bytes(("\n".join(lines) + "\n").encode("utf-8-sig"))
+                self.assertEqual(self.stage.apply_merge_session(directory), (0, 2))
+                book = load_workbook(self.target)
+                self.assertIsNone(book["売上"]["A4"].value)
+                self.assertFalse(book["売上"]["A4"].font.bold)
+                self.assertTrue(book["売上"].row_dimensions[4].font.bold)
+                self.assertIsNone(book["売上"]["H3"].value)
+                self.assertEqual(book["売上"]["H3"].fill.fgColor.rgb, "0000FF00")
+                book.close()
 
     def test_same_file_and_normalized_path_are_rejected(self):
         (self.directory / "sub").mkdir()
@@ -363,7 +617,7 @@ class ExcelMergeTests(unittest.TestCase):
         source = self.source.read_bytes(), self.source.stat().st_mtime_ns
         directory, state = self.prepare()
         self.select(directory, state, {("売上", "A1"), ("売上", "E1"), ("売上", "G1"), ("備考", "B4")})
-        self.assertEqual(self.stage.apply_merge_session(directory), 4)
+        self.assertEqual(self.stage.apply_merge_session(directory), (4, 0))
         book = load_workbook(self.target)
         self.assertEqual(book["売上"]["A1"].value, "新しい値")
         self.assertEqual(book["売上"]["B1"].value, 10)
@@ -381,7 +635,7 @@ class ExcelMergeTests(unittest.TestCase):
     def test_no_selection_preserves_target_bytes_and_timestamp(self):
         before = self.target.read_bytes(), self.target.stat().st_mtime_ns
         directory, _ = self.prepare()
-        self.assertEqual(self.stage.apply_merge_session(directory), 0)
+        self.assertEqual(self.stage.apply_merge_session(directory), (0, 0))
         self.assertEqual((self.target.read_bytes(), self.target.stat().st_mtime_ns), before)
         self.assertFalse(json.loads((directory / "session.json").read_text(encoding="utf-8"))["applied"])
 
@@ -389,7 +643,7 @@ class ExcelMergeTests(unittest.TestCase):
         directory, state = self.prepare()
         self.select(directory, state, {("売上", "A1")})
         self.assert_unchanged_failure(lambda: self.stage.apply_session(directory))
-        self.assertEqual(self.stage.apply_merge_session(directory), 1)
+        self.assertEqual(self.stage.apply_merge_session(directory), (1, 0))
         self.assert_unchanged_failure(lambda: self.stage.apply_merge_session(directory))
         directory, state = self.prepare()
         state["target"] = "index"
@@ -428,7 +682,7 @@ class ExcelMergeTests(unittest.TestCase):
         directory, state = self.prepare()
         self.select(directory, state, {("売上", "A1")})
         self.edit(self.source, {("売上", "A1"): "後から変更"})
-        self.assertEqual(self.stage.apply_merge_session(directory), 1)
+        self.assertEqual(self.stage.apply_merge_session(directory), (1, 0))
         book = load_workbook(self.target)
         self.assertEqual(book["売上"]["A1"].value, "新しい値")
         book.close()
@@ -450,7 +704,7 @@ class ExcelMergeTests(unittest.TestCase):
                 for text in texts:
                     for separator in ("\u2028", "\x85", "\u2029"):
                         self.assertNotIn(separator.encode(), text)
-                self.assertEqual(self.stage.apply_merge_session(directory), 1)
+                self.assertEqual(self.stage.apply_merge_session(directory), (1, 0))
                 book = load_workbook(self.target)
                 self.assertEqual(book["売上"]["A1"].value, value)
                 book.close()
@@ -459,7 +713,7 @@ class ExcelMergeTests(unittest.TestCase):
         self.edit(self.source, {("売上", "B1"): 123.5, ("売上", "C1"): False, ("売上", "D1"): "=B1*3"})
         directory, state = self.prepare()
         self.select(directory, state, {("売上", "B1"), ("売上", "C1"), ("売上", "D1")})
-        self.assertEqual(self.stage.apply_merge_session(directory), 3)
+        self.assertEqual(self.stage.apply_merge_session(directory), (3, 0))
         book = load_workbook(self.target)
         self.assertEqual(book["売上"]["B1"].value, 123.5)
         self.assertIs(book["売上"]["C1"].value, False)
@@ -583,9 +837,9 @@ class ExcelMergeTests(unittest.TestCase):
         errors = io.StringIO()
         with mock.patch.object(self.stage.sys, "stderr", errors), mock.patch.object(self.stage.time, "monotonic", side_effect=[10, 11]):
             selected, _ = self.run_win(directory, state)
-        self.assertEqual(selected, set())
+        self.assertEqual(selected, self.stage.Selection(set(), set()))
         self.assertIn("WinMerge がすぐ終了しました", errors.getvalue())
-        self.assertEqual(self.stage.apply_merge_session(directory), 0)
+        self.assertEqual(self.stage.apply_merge_session(directory), (0, 0))
         self.assertEqual((self.target.read_bytes(), self.target.stat().st_mtime_ns), before)
 
     def test_winmerge_line_endings_and_optional_bom_are_accepted(self):
@@ -601,7 +855,7 @@ class ExcelMergeTests(unittest.TestCase):
         lines = self.copied_lines(directory, state, {("売上", "A1")})
         data = "".join(line + ("\n" if index % 2 else "\r\n") for index, line in enumerate(lines)).encode("utf-8-sig")
         selected, _ = self.run_win(directory, state, lambda _: data)
-        self.assertEqual(len(selected), 1)
+        self.assertEqual((len(selected.values), len(selected.formats)), (1, 0))
 
     def test_winmerge_non_utf8_saves_are_rejected(self):
         for encoding in ("utf-16", "cp932"):
@@ -665,7 +919,7 @@ class ExcelMergeTests(unittest.TestCase):
         with mock.patch.object(self.stage, "find_winmerge", return_value="WinMergeU.exe"), mock.patch.object(
             self.stage.subprocess, "run", side_effect=launch
         ), mock.patch.object(self.stage.sys.stdin, "isatty", return_value=True), mock.patch("builtins.input", return_value="y") as prompt:
-            self.assertEqual(len(self.stage.run_winmerge(directory)), 1)
+            self.assertEqual(tuple(map(len, self.stage.run_winmerge(directory))), (1, 0))
         self.assertEqual(saved[1], b"invalid")
         prompt.assert_called_once_with("WinMerge を開き直して直しますか [y/N]: ")
 
@@ -715,7 +969,7 @@ class ExcelMergeTests(unittest.TestCase):
             self.assertTrue(merge)
             state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
             self.select(directory, state, {("売上", "A1")})
-            self.assertEqual(self.stage.apply_merge_session(directory), 1)
+            self.assertEqual(self.stage.apply_merge_session(directory), (1, 0))
             return 0
 
         status, output, errors, _, _, _ = self.main([str(self.target), str(self.source)], picker=picker)

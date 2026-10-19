@@ -661,7 +661,7 @@ assert "word_stage_ooxml" not in sys.modules
 state = stage.prepare_session(repo, sys.argv[4], directory)
 assert "format" not in state
 stage.git(directory / "picker", "add", "--all", env=stage.isolated_env())
-assert stage.apply_session(directory) == 1
+assert stage.apply_session(directory) == (1, 0)  # values, formats
 assert "word_ooxml" not in sys.modules
 assert "word_stage_ooxml" not in sys.modules
 try:
