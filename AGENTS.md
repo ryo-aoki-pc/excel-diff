@@ -10,7 +10,7 @@
 
 ## このリポジトリは何か
 
-Excel のブックをセル単位のテキストにして Git の差分に表示し、選んだセル変更だけを部分ステージする道具。導入の表は [README.md](README.md)、仕様と検査・macOS の導入は [docs/reference/readme.md](docs/reference/readme.md)、注意点は [docs/extra/readme.md](docs/extra/readme.md)、検証記録は [非公開側の readme.md](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)。
+Excel のブックと Word の文書を、セル・段落の単位のテキストにして Git の差分に表示し、選んだ変更だけを部分ステージする道具。任意の 2 つのブック・文書を比べ、WinMerge または lazygit で選んだ変更を一方へ取り込むこともできる。導入の表は [README.md](README.md)、仕様と検査・macOS の導入は [docs/reference/readme.md](docs/reference/readme.md)、注意点は [docs/extra/readme.md](docs/extra/readme.md)、検証記録は [非公開側の readme.md](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)。
 
 lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygit) にあり、`E` のキーが、このリポジトリの導入スクリプトで登録する `git excel-stage` を呼ぶ。
 
@@ -22,21 +22,30 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 
 ## 構成
 
-- `scripts/excel-textconv.py` — Git の textconv で、Excel のセルを差分用のテキストにする
-- `scripts/excel-stage.py` — 専用画面で選んだセル変更を、Excel の形のまま部分ステージする
+- `scripts/excel-textconv.py` — Git の textconv で、Excel のセルと Word の段落・表などを差分用のテキストにする
+- `scripts/excel-stage.py` — Excel・Word の変更を専用画面で部分ステージし、任意の 2 ファイル間で選んだ変更を取り込む
 - `scripts/excel_stage_ooxml.py` — ブックのセルを比較し、選んだセルだけを作り直す
-- `scripts/setup-excel-diff.py` — 差分表示と部分ステージを、その端末の Git 全体に設定する
+- `scripts/word_ooxml.py` — Word の段落・表・書式などを比較用のテキストにする
+- `scripts/word_stage_ooxml.py` — Word の変更を比較し、選んだ段落・セル・表などだけを作り直す
+- `scripts/setup-excel-diff.py` — Excel・Word の差分表示・部分ステージ・取り込みを、その端末の Git 全体に設定する
 - `requirements-excel-diff.txt` — リポジトリの外の仮想環境に入れる依存関係
 - `tests/test_excel_textconv.py` — textconv と Git の差分表示の自動テスト
 - `tests/test_excel_stage.py` — Git のインデックスを使った部分ステージの自動テスト
 - `tests/test_excel_stage_ooxml.py` — セルの比較とブックの再構成の自動テスト
+- `tests/test_excel_merge.py` — 任意の 2 つのブックの取り込みの自動テスト
+- `tests/word_fixtures.py` — Word の自動テストに使う文書を作る
+- `tests/test_word_ooxml.py` — Word の読み込み・表示・比較用データの自動テスト
+- `tests/test_word_stage_ooxml.py` — Word の変更の比較と文書の再構成の自動テスト
+- `tests/test_word_textconv.py` — Word の textconv と Git の差分表示の自動テスト
+- `tests/test_word_stage.py` — Git のインデックスを使った Word の部分ステージの自動テスト
+- `tests/test_word_merge.py` — 任意の 2 つの Word 文書の取り込みの自動テスト
 - `tests/test_setup_excel_stage.py` — 導入・更新・Git の alias の自動テスト
 - `README.md` — 道具の概要・導入の表・表示例・文書の一覧
 - `AGENTS.md` — コーディングエージェントの作業規則
 - `CLAUDE.md` — Claude Code から AGENTS.md を読むための指定
 - `.gitignore` — Python の実行時キャッシュとローカルの設定・同期マーカーを除く
-- `docs/reference/readme.md` — Excel の差分表示の仕様と検査・macOS の導入
-- `docs/extra/readme.md` — 注意点
+- `docs/reference/readme.md` — Excel・Word の差分表示・取り込みと Word の部分ステージの仕様、自動検証・macOS の導入
+- `docs/extra/readme.md` — Excel・Word の注意点とロールバック
 
 ## テスト
 
