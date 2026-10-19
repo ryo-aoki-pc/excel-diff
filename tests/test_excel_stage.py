@@ -17,6 +17,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
+import xml.etree.ElementTree as ET
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
@@ -120,25 +122,21 @@ class ExcelStageTests(unittest.TestCase):
         state = self.stage.prepare_session(self.repo, self.path.name, session)
         return session, state
 
-    def select(self, session, state, selection):
-        """Stage only requested (sheet name, coordinate) projected replacements."""
+    def select(self, session, state, selection=(), formats=()):
+        """Stage only requested value/format record replacements."""
         picker = session / "picker"
         picker_env = {key: value for key, value in self.env.items() if key != "GIT_INDEX_FILE"}
         for sheet in state["sheets"]:
-            filename = sheet["filename"]
-            baseline = self.git("show", "HEAD:" + filename, cwd=picker, env=picker_env).decode("utf-8")
-            working = (picker / filename).read_text(encoding="utf-8")
-            replacements = {
-                json.loads(line)[0]: line
-                for line in working.splitlines()
-                if (sheet["name"], json.loads(line)[0]) in selection
-            }
-            result = [
-                replacements.get(json.loads(line)[0], line)
-                for line in baseline.splitlines()
-            ]
-            (picker / filename).write_text("\n".join(result) + "\n", encoding="utf-8")
-            self.git("add", "--", filename, cwd=picker, env=picker_env)
+            for key, selected in (("filename", selection), ("formats_filename", formats)):
+                filename = sheet[key]
+                baseline = self.git("show", "HEAD:" + filename, cwd=picker, env=picker_env).decode("utf-8")
+                working = (picker / filename).read_text(encoding="utf-8")
+                # Blank lines separate format records and are never replaced.
+                replacements = {json.loads(line)[0]: line for line in working.splitlines()
+                                if line and (sheet["name"], json.loads(line)[0]) in selected}
+                result = [replacements.get(json.loads(line)[0], line) if line else line for line in baseline.splitlines()]
+                (picker / filename).write_text("\n".join(result) + ("\n" if result else ""), encoding="utf-8")
+                self.git("add", "--", filename, cwd=picker, env=picker_env)
 
     def index_bytes(self):
         index = self.git("rev-parse", "--git-path", "index").decode().strip()
@@ -178,7 +176,7 @@ class ExcelStageTests(unittest.TestCase):
             ("備考", "B4"),
         }
         self.select(session, state, selection)
-        self.assertEqual(self.stage.apply_session(session), len(selection))
+        self.assertEqual(self.stage.apply_session(session), (len(selection), 0))
         book = self.staged_values()
         self.assertEqual(book["売上"]["A1"].value, "元の値")
         for coordinate, value in {
@@ -199,7 +197,7 @@ class ExcelStageTests(unittest.TestCase):
         (self.repo / "notes.txt").write_text("staged after session\n", encoding="utf-8")
         self.git("add", "--", "notes.txt")
         notes_before = self.git("show", ":notes.txt")
-        self.assertEqual(self.stage.apply_session(session), 1)
+        self.assertEqual(self.stage.apply_session(session), (1, 0))
         book = self.staged_values()
         self.assertEqual(book["売上"]["A1"].value, "ステージ済み")
         self.assertEqual(book["売上"]["B1"].value, 30)
@@ -225,7 +223,7 @@ class ExcelStageTests(unittest.TestCase):
         self.assertIn(sheet["filename"].encode("utf-8"), diff)
         self.assertNotIn(b"\\345", diff)
         self.select(session, state, {("売上 表", "A1")})
-        self.assertEqual(self.stage.apply_session(session), 1)
+        self.assertEqual(self.stage.apply_session(session), (1, 0))
         self.assertEqual(self.staged_values()["売上 表"]["A1"].value, "UTF-8 のハンク選択")
         self.assertEqual(self.git("config", "--get", "core.quotePath"), b"true\n")
 
@@ -255,7 +253,7 @@ class ExcelStageTests(unittest.TestCase):
         self.assertEqual(Path(state["repo"]), worktree)
         self.assertNotEqual(Path(state["index"]), self.repo / ".git" / "index")
         self.select(session, state, {("売上", "A1")})
-        self.assertEqual(self.stage.apply_session(session), 1)
+        self.assertEqual(self.stage.apply_session(session), (1, 0))
         data = self.git("show", ":" + work_path.name, cwd=worktree)
         book = load_workbook(io.BytesIO(data))
         self.assertEqual(book["売上"]["A1"].value, "作業ツリーの変更")
@@ -277,7 +275,7 @@ class ExcelStageTests(unittest.TestCase):
             # Bytes keep LF on Windows, where write_text would store CRLF.
             (self.repo / "notes.txt").write_bytes(b"other alternate stage\n")
             self.git("add", "--", "notes.txt")
-            self.assertEqual(self.stage.apply_session(session), 1)
+            self.assertEqual(self.stage.apply_session(session), (1, 0))
             self.assertEqual(self.staged_values()["売上"]["A1"].value, "別インデックスの選択")
             self.assertEqual(self.git("show", ":notes.txt"), b"other alternate stage\n")
         self.assertEqual(self.index_bytes(), standard_index)
@@ -299,7 +297,7 @@ class ExcelStageTests(unittest.TestCase):
                 session = self.directory / ("literal-" + str(number))
                 state = self.stage.prepare_session(self.repo, filename, session)
                 self.select(session, state, {("売上", "A1")})
-                self.assertEqual(self.stage.apply_session(session), 1)
+                self.assertEqual(self.stage.apply_session(session), (1, 0))
                 book = load_workbook(io.BytesIO(self.staged_bytes(path)))
                 self.assertEqual(book["売上"]["A1"].value, filename)
                 book.close()
@@ -375,7 +373,7 @@ class ExcelStageTests(unittest.TestCase):
         session, _ = self.prepare()
         # Closing the picker performs no apply operation.
         self.assertEqual(self.index_bytes(), before)
-        self.assertEqual(self.stage.apply_session(session), 0)
+        self.assertEqual(self.stage.apply_session(session), (0, 0))
         self.assertEqual(self.index_bytes(), before)
 
     def test_target_index_change_rejects_and_preserves_newer_stage(self):
@@ -449,12 +447,14 @@ class ExcelStageTests(unittest.TestCase):
                 "show", "HEAD:" + sheet["filename"], cwd=session / "picker"
             ))
         self.assertEqual(set(self.git("ls-files", cwd=session / "picker").decode().splitlines()),
-                         {sheet["filename"] for sheet in state["sheets"]})
+                         {sheet[key] for sheet in state["sheets"] for key in ("filename", "formats_filename")})
         self.select(session, state, {("売上", "A1")})
         with mock.patch.object(self.stage.Workbook, "projection", side_effect=AssertionError("projection recomputed")), mock.patch.object(
-            self.stage, "parse_record", wraps=self.stage.parse_record
-        ) as parse:
-            self.assertEqual(self.stage.apply_session(session), 1)
+            self.stage.Workbook((session / "base.xlsx").read_bytes()).compare_formats(
+                self.stage.Workbook((session / "work.xlsx").read_bytes())).__class__,
+            "projection", side_effect=AssertionError("format projection recomputed")
+        ), mock.patch.object(self.stage, "parse_record", wraps=self.stage.parse_record) as parse:
+            self.assertEqual(self.stage.apply_session(session), (1, 0))
         self.assertEqual(parse.call_count, 2, "only the baseline and selected version of one replacement need parsing")
         self.assertEqual(self.staged_values()["売上"]["B1"].value, 10)
 
@@ -474,6 +474,7 @@ class ExcelStageTests(unittest.TestCase):
         state.pop("base_sha256")
         for sheet in state["sheets"]:
             sheet.pop("baseline_sha256")
+            sheet.pop("formats_baseline_sha256")
         self.stage.write_json(session / "session.json", state)
         with self.assertRaisesRegex(self.stage.StageError, "画面を閉じて選び直してください"):
             self.stage.apply_session(session)
@@ -589,7 +590,7 @@ class ExcelStageTests(unittest.TestCase):
                 session = self.directory / ("format-" + extension[1:])
                 state = self.stage.prepare_session(self.repo, path.name, session)
                 self.select(session, state, {("売上", "B1")})
-                self.assertEqual(self.stage.apply_session(session), 1)
+                self.assertEqual(self.stage.apply_session(session), (1, 0))
                 book = load_workbook(io.BytesIO(self.staged_bytes(path)))
                 self.assertEqual(book["売上"]["B1"].value, 25)
                 self.assertEqual(book["売上"]["A1"].value, "元の値")
@@ -634,18 +635,27 @@ class ExcelStageTests(unittest.TestCase):
                     lambda: self.stage.prepare_session(self.repo, self.path.name, self.directory / change)
                 )
 
-    def test_formatting_only_changes_cannot_be_selected(self):
-        baseline = self.staged_bytes()
+    def test_formatting_only_change_is_listed_and_staged(self):
         book = load_workbook(self.path)
+        width = book["売上"].column_dimensions["A"].width
         book["売上"]["A1"].font = Font(italic=True, color="0000FF")
         book["売上"].column_dimensions["A"].width = 70
         book.save(self.path)
         book.close()
-        self.assertNotEqual(self.path.read_bytes(), baseline)
+        working = self.path.read_bytes()
         session, state = self.prepare()
-        self.assertEqual(self.git("diff", "--", cwd=session / "picker"), b"")
-        self.assertEqual(self.stage.apply_session(session), 0)
-        self.assertEqual(self.staged_bytes(), baseline)
+        for sheet in state["sheets"]:
+            self.assertEqual(self.git("diff", "--", sheet["filename"], cwd=session / "picker"), b"")
+        self.assertIn(b'"format"', self.git("diff", "--", cwd=session / "picker"))
+        self.select(session, state, formats={("売上", "A1")})
+        self.assertEqual(self.stage.apply_session(session), (0, 1))
+        staged = self.staged_values()["売上"]
+        self.assertEqual(staged["A1"].value, "元の値")
+        self.assertTrue(staged["A1"].font.italic)
+        self.assertFalse(staged["A1"].font.bold)
+        self.assertEqual(staged["A1"].font.color.rgb, "000000FF")
+        self.assertEqual(staged.column_dimensions["A"].width, width)
+        self.assertEqual(self.path.read_bytes(), working)
 
     def test_index_style_is_preserved_when_selected_cell_value_changes(self):
         self.edit({("売上", "A1"): "新しい文字列"})
@@ -655,13 +665,188 @@ class ExcelStageTests(unittest.TestCase):
         book.close()
         session, state = self.prepare()
         self.select(session, state, {("売上", "A1")})
-        self.assertEqual(self.stage.apply_session(session), 1)
+        self.assertEqual(self.stage.apply_session(session), (1, 0))
         staged = self.staged_values()["売上"]["A1"]
         self.assertEqual(staged.value, "新しい文字列")
         self.assertTrue(staged.font.bold)
         self.assertFalse(staged.font.italic)
         self.assertEqual(staged.font.color.rgb, "00FF0000")
         self.assertEqual(staged.fill.fgColor.rgb, "00FFFF00")
+
+
+    def test_value_and_format_of_one_cell_can_be_selected_independently(self):
+        baseline = self.staged_bytes()
+        for values, formats in ((True, False), (False, True), (True, True)):
+            with self.subTest(values=values, formats=formats):
+                self.path.write_bytes(baseline)
+                self.git("add", "--", self.path.name)
+                book = load_workbook(self.path)
+                book["売上"]["A1"] = "値と書式"
+                book["売上"]["A1"].font = Font(italic=True, color="0000FF")
+                book.save(self.path)
+                book.close()
+                directory = self.directory / ("independent-" + str(values) + str(formats))
+                state = self.stage.prepare_session(self.repo, self.path.name, directory)
+                key = {("売上", "A1")}
+                self.select(directory, state, key if values else (), key if formats else ())
+                self.assertEqual(self.stage.apply_session(directory), (int(values), int(formats)))
+                cell = self.staged_values()["売上"]["A1"]
+                self.assertEqual(cell.value, "値と書式" if values else "元の値")
+                self.assertEqual(bool(cell.font.italic), formats)
+                self.assertEqual(bool(cell.font.bold), not formats)
+
+    def test_blank_cell_format_and_value_inherited_from_row_are_independent(self):
+        book = load_workbook(self.path)
+        book["売上"].row_dimensions[8].font = Font(bold=True)
+        book.save(self.path)
+        book.close()
+        self.git("add", "--", self.path.name)
+        book = load_workbook(self.path)
+        book["売上"]["A8"] = "行の書式を保つ"
+        book["売上"]["Z8"].font = Font(italic=True)
+        book.save(self.path)
+        book.close()
+        session, state = self.prepare()
+        self.select(session, state, {("売上", "A8")}, {("売上", "Z8")})
+        self.assertEqual(self.stage.apply_session(session), (1, 1))
+        sheet = self.staged_values()["売上"]
+        self.assertEqual(sheet["A8"].value, "行の書式を保つ")
+        self.assertTrue(sheet["A8"].font.bold)
+        self.assertIsNone(sheet["Z8"].value)
+        self.assertTrue(sheet["Z8"].font.italic)
+        self.assertTrue(sheet.row_dimensions[8].font.bold)
+
+    def test_incomplete_or_invented_format_selection_preserves_index(self):
+        book = load_workbook(self.path)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.path)
+        book.close()
+        for malformed in ("missing", "duplicate", "description", "value-kind"):
+            with self.subTest(malformed=malformed):
+                session = self.directory / malformed
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                sheet = state["sheets"][0]
+                filename = sheet["formats_filename"]
+                projected = session / "picker" / filename
+                lines = projected.read_text(encoding="utf-8").splitlines()
+                if malformed == "missing":
+                    lines = []
+                elif malformed == "duplicate":
+                    lines += lines
+                else:
+                    record = json.loads(lines[0])
+                    if malformed == "description":
+                        record[2] = "存在しない書式"
+                    else:
+                        record[1] = "string"
+                    lines[0] = json.dumps(record, ensure_ascii=False)
+                projected.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+                self.git("add", "--", filename, cwd=session / "picker")
+                before = self.index_bytes()
+                with self.assertRaisesRegex(ValueError, "売上!A1.*書式の選択が不完全"):
+                    self.stage.apply_session(session)
+                self.assertEqual(self.index_bytes(), before)
+
+    def test_one_sided_format_selection_next_to_a_separator_preserves_index(self):
+        book = load_workbook(self.path)
+        book["売上"]["A1"].font = Font(italic=True)
+        book["売上"]["Z9"].fill = PatternFill("solid", fgColor="FFFFFF00")
+        book.save(self.path)
+        book.close()
+        session, state = self.prepare()
+        filename = state["sheets"][0]["formats_filename"]
+        picker = session / "picker"
+        baseline = self.git("show", "HEAD:" + filename, cwd=picker).decode("utf-8").splitlines()
+        self.assertEqual([line[:6] for line in baseline], ['["A1",', "", '["Z9",'])
+        working = (picker / filename).read_text(encoding="utf-8").splitlines()
+        before = self.index_bytes()
+        # Staging only the deleted side of A1 leaves the separator in its place;
+        # staging only its added side pushes the separator down.
+        for staged in (baseline[1:], [baseline[0], working[0], *baseline[1:]]):
+            with self.subTest(staged=staged[:2]):
+                (picker / filename).write_text("\n".join(staged) + "\n", encoding="utf-8")
+                self.git("add", "--", filename, cwd=picker)
+                with self.assertRaisesRegex(ValueError, "売上!A1 の書式の選択が不完全"):
+                    self.stage.apply_session(session)
+                self.assertEqual(self.index_bytes(), before)
+
+        # A count mismatch at a separating blank line names the record before it.
+        (picker / filename).write_text("\n".join(baseline) + "\n\n", encoding="utf-8")
+        self.git("add", "--", filename, cwd=picker)
+        with self.assertRaisesRegex(ValueError, "売上!Z9 の書式の選択が不完全"):
+            self.stage.apply_session(session)
+        self.assertEqual(self.index_bytes(), before)
+
+    def test_format_baseline_tampering_and_legacy_digest_are_rejected(self):
+        book = load_workbook(self.path)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.path)
+        book.close()
+        for change in ("baseline", "legacy"):
+            with self.subTest(change=change):
+                session = self.directory / change
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                self.select(session, state, formats={("売上", "A1")})
+                sheet = state["sheets"][0]
+                if change == "baseline":
+                    (session / "baseline" / sheet["formats_filename"]).write_bytes(b"tampered\n")
+                else:
+                    sheet.pop("formats_baseline_sha256")
+                    self.stage.write_json(session / "session.json", state)
+                self.assert_rejected_without_index_change(lambda: self.stage.apply_session(session))
+
+    def test_rich_text_value_unsupported_cell_format_can_be_staged(self):
+        namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+        def rich(data):
+            output = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(data)) as original, zipfile.ZipFile(output, "w") as result:
+                for info in original.infolist():
+                    content = original.read(info.filename)
+                    if info.filename == "xl/worksheets/sheet1.xml":
+                        root = ET.fromstring(content)
+                        cell = root.find(".//{" + namespace + "}c[@r='A1']")
+                        for child in list(cell):
+                            cell.remove(child)
+                        cell.set("t", "inlineStr")
+                        inline = ET.SubElement(cell, "{" + namespace + "}is")
+                        run = ET.SubElement(inline, "{" + namespace + "}r")
+                        ET.SubElement(run, "{" + namespace + "}t").text = "リッチテキスト"
+                        content = ET.tostring(root, encoding="utf-8")
+                    result.writestr(info, content)
+            return output.getvalue()
+
+        baseline = self.path.read_bytes()
+        book = load_workbook(self.path)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.path)
+        book.close()
+        changed = rich(self.path.read_bytes())
+        self.path.write_bytes(rich(baseline))
+        self.git("add", "--", self.path.name)
+        self.path.write_bytes(changed)
+        session, state = self.prepare()
+        self.select(session, state, formats={("売上", "A1")})
+        self.assertEqual(self.stage.apply_session(session), (0, 1))
+        self.assertTrue(self.staged_values()["売上"]["A1"].font.italic)
+        with zipfile.ZipFile(io.BytesIO(self.staged_bytes())) as archive:
+            root = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        self.assertIsNotNone(root.find(".//{" + namespace + "}c[@r='A1']/{" + namespace + "}is/{" + namespace + "}r"))
+
+    def test_cli_counts_values_and_formats_without_changing_value_only_wording(self):
+        self.edit({("売上", "A1"): "CLI の値"})
+        book = load_workbook(self.path)
+        book["売上"]["A1"].font = Font(italic=True)
+        book.save(self.path)
+        book.close()
+        session, state = self.prepare()
+        self.select(session, state, {("売上", "A1")}, {("売上", "A1")})
+        result = subprocess.run([sys.executable, str(SCRIPT), "--apply-session", str(session)],
+                                cwd=self.repo, env=self.env, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
+        self.assertIn("値 1 セル・書式 1 セルを Excel のままステージしました。", result.stdout.decode("utf-8"))
+        self.assertEqual(self.stage._count_text(2, 0), "2 セル")
+        self.assertEqual(self.stage._count_text(0, 1), "書式 1 セル")
 
 
 class SessionCleanupTests(unittest.TestCase):

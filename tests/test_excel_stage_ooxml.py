@@ -80,6 +80,34 @@ def cell_node(root, coordinate):
     return root.find(".//{" + NS + "}c[@r='" + coordinate + "']")
 
 
+def styles_xml(fonts=None, fills=None, borders=None, xfs=None,
+               style_xfs=None, cell_styles=None, num_fmts="", extra=""):
+    fonts = fonts or ["<font/>", "<font><b/></font>", "<font><i/></font>"]
+    fills = fills or ['<fill><patternFill/></fill>', '<fill><patternFill patternType="gray125"/></fill>']
+    borders = borders or ["<border/>"]
+    xfs = xfs or ['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+                  '<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+                  '<xf fontId="2" fillId="0" borderId="0" numFmtId="0" xfId="0"/>']
+    style_xfs = style_xfs or ['<xf fontId="0" fillId="0" borderId="0" numFmtId="0"/>']
+    cell_styles = cell_styles or ['<cellStyle name="Normal" xfId="0" builtinId="0"/>']
+    containers = (("fonts", fonts), ("fills", fills), ("borders", borders),
+                  ("cellStyleXfs", style_xfs), ("cellXfs", xfs), ("cellStyles", cell_styles))
+    content = num_fmts + "".join('<' + name + ' count="' + str(len(items)) + '">' + "".join(items) + '</' + name + '>' for name, items in containers)
+    return ('<styleSheet xmlns="' + NS + '">' + content + extra + '</styleSheet>').encode("utf-8")
+
+
+def styled_book(sheet_data, styles=None, before="", after=""):
+    worksheet = ('<worksheet xmlns="' + NS + '"><dimension ref="A1"/>' + before +
+                 '<sheetData>' + sheet_data + '</sheetData>' + after + '</worksheet>').encode("utf-8")
+    return replace_parts(book_bytes(), {"xl/styles.xml": styles or styles_xml(),
+                                       "xl/worksheets/sheet1.xml": worksheet})
+
+
+def style_cell(coordinate, style, value="1"):
+    content = "" if value is None else '<v>' + value + '</v>'
+    return '<c r="' + coordinate + '" s="' + str(style) + '">' + content + '</c>'
+
+
 class OoxmlStagingTests(unittest.TestCase):
     def test_number_fast_path_matches_decimal_at_normalization_boundaries(self):
         cases = {
@@ -266,9 +294,9 @@ class OoxmlStagingTests(unittest.TestCase):
         checked = []
         original_load = OOXML.Workbook._load_sheet
 
-        def load_sheet(book, sheet, strings, expected=None):
+        def load_sheet(book, sheet, strings, expected=None, **kwargs):
             checked.append(sheet.id)
-            return original_load(book, sheet, strings, expected)
+            return original_load(book, sheet, strings, expected, **kwargs)
 
         with mock.patch.object(OOXML.Workbook, "_load_sheet", load_sheet):
             result = base.rebuild(work, {("1", "A1")})
@@ -471,6 +499,7 @@ class OoxmlStagingTests(unittest.TestCase):
         self.assertEqual(base.cells, source.cells)
         self.assertEqual(base.projection(source), source.projection(base))
         self.assertEqual(base.rebuild(source, set()), original)
+        self.assertEqual(list(base.compare_formats(source).keys()), [("1", "E1")])
         self.assertEqual(base.cells[("1", "B1")], OOXML.Cell("number", "100"))
         self.assertEqual(base.cells[("1", "B2")], OOXML.Cell("formula", "=B1*2"))
 
@@ -670,6 +699,429 @@ class OoxmlStagingTests(unittest.TestCase):
         self.assertEqual([int(row.get("r")) for row in rows], list(range(1, 301)))
         fifth = [cell.get("r") for cell in rows[4].findall("{" + NS + "}c")]
         self.assertEqual(fifth, ["A5", "C5", "D5"])
+
+
+class OoxmlFormatTests(unittest.TestCase):
+
+    def test_loading_values_does_not_parse_styles_until_formats_are_needed(self):
+        paths = []
+        original_xml = OOXML._xml
+
+        def parse(data, name):
+            paths.append(name)
+            return original_xml(data, name)
+
+        with mock.patch.object(OOXML, "_xml", parse):
+            book = OOXML.Workbook(book_bytes())
+            book.projection()
+            self.assertNotIn("xl/styles.xml", paths)
+            book.stylesheet()
+        self.assertEqual(paths.count("xl/styles.xml"), 1)
+
+    def test_canonical_ignores_writer_defaults_alpha_and_apply_flags(self):
+        fonts = ['<font><b/><sz val="11"/><color rgb="00FF0000"/></font>',
+                 '<font><b val="1"/><i val="0"/><sz val="11.0"/><color rgb="FFFF0000"/></font>']
+        fills = ['<fill><patternFill/></fill>', '<fill><patternFill patternType="none"/></fill>']
+        borders = ['<border/>', '<border outline="1"><left/><right style="none"/></border>']
+        xfs = ['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+               '<xf fontId="1" fillId="1" borderId="1" numFmtId="0" xfId="0" applyFont="1" quotePrefix="0" pivotButton="0">'
+               '<alignment horizontal="general" vertical="bottom" textRotation="0" wrapText="0" indent="0"/>'
+               '<protection locked="1" hidden="0"/></xf>']
+        styles = OOXML.Workbook(styled_book('', styles_xml(fonts, fills, borders, xfs))).stylesheet()
+        self.assertEqual(styles.canonical(0), styles.canonical(1))
+        self.assertNotEqual(styles.exact(0), styles.exact(1))
+
+    def test_format_comparison_resolves_content_instead_of_style_indices(self):
+        base = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>'))
+        xfs = ['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+               '<xf fontId="2" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+               '<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"/>']
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 2) + '</row>', styles_xml(xfs=xfs)))
+        self.assertFalse(base.compare_formats(source).differs(("1", "A1")))
+        self.assertEqual(list(base.compare_formats(source).keys()), [])
+
+
+    def test_different_default_xfs_are_compared_for_explicit_zero_value_cells(self):
+        normal = styles_xml()
+        bold = styles_xml(xfs=['<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"/>'])
+        sheet = '<row r="1"><c r="A1"><v>1</v></c></row>'
+        base = OOXML.Workbook(styled_book(sheet, bold))
+        source = OOXML.Workbook(styled_book(sheet, normal))
+        comparison = base.compare_formats(source)
+        self.assertEqual(list(comparison.keys()), [("1", "A1"), ("2", "A1")])
+        self.assertEqual(comparison.texts(("1", "A1")), ("既定の書式", "太字なし"))
+
+    def test_format_projection_is_aligned_sorted_and_contains_only_differences(self):
+        def sheet(changed):
+            index = 1 if changed else 0
+            return ('<row r="2">' + ''.join(style_cell(c, index) for c in ("AA2", "B2", "A2")) + '</row>'
+                    '<row r="3">' + style_cell("B3", 2 if changed else 1, None) + style_cell("D3" if changed else "C3", 1, None) + '</row>'
+                    '<row r="10">' + style_cell("A10", index) + style_cell("B10", 0) + '</row>')
+        base, source = (OOXML.Workbook(styled_book(sheet(changed))) for changed in (False, True))
+        baseline, changed, coordinates = base.compare_formats(source).projection()
+        before = [OOXML.parse_record(line) for line in baseline["1"].splitlines()[::2]]
+        after = [OOXML.parse_record(line) for line in changed["1"].splitlines()[::2]]
+        expected = ["A2", "B2", "AA2", "B3", "C3", "D3", "A10"]
+        # A blank line between records keeps each cell its own hunk.
+        for text in (baseline["1"], changed["1"]):
+            self.assertEqual(text.splitlines()[1::2], [""] * (len(expected) - 1))
+            self.assertTrue(text.endswith("]\n"))
+        self.assertEqual([coordinate for coordinate, _ in before], expected)
+        self.assertEqual([coordinate for coordinate, _ in after], expected)
+        self.assertTrue(all(old != new for old, new in zip(before, after)))
+        self.assertTrue(all(cell.kind == "format" for _, cell in before + after))
+        self.assertEqual(list(coordinates["1"]), expected)
+        self.assertEqual(baseline["2"], "")
+
+    def test_effective_style_resolves_cells_then_rows_then_columns(self):
+        data = styled_book('<row r="1" s="2" customFormat="1"><c r="A1"/></row>'
+                           '<row r="2" customFormat="1"/><row r="3" s="2" customFormat="0"/>',
+                           before='<cols><col min="1" max="3" style="1"/></cols>')
+        book = OOXML.Workbook(data)
+        for coordinate, expected in (("A1", 0), ("B1", 2), ("B2", 0), ("B3", 1), ("C4", 1), ("D4", 0)):
+            with self.subTest(coordinate=coordinate):
+                self.assertEqual(book.effective_style(("1", coordinate)), expected)
+        self.assertIn(("1", "A1"), book.cell_styles)
+
+    def test_format_descriptions_use_target_default_and_japanese_labels(self):
+        base = OOXML.Workbook(styled_book('<row r="2">' + style_cell("B2", 0) + '</row>'))
+        styles = styles_xml(fonts=['<font/>', '<font><b/><color rgb="FFFF0000"/></font>'],
+                            fills=['<fill><patternFill/></fill>', '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill>'],
+                            xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+                                 '<xf fontId="1" fillId="1" borderId="0" numFmtId="0" xfId="0"/>'])
+        source = OOXML.Workbook(styled_book('<row r="2">' + style_cell("B2", 1) + '</row>', styles))
+        old, new = base.compare_formats(source).texts(("1", "B2"))
+        self.assertEqual(old, "既定の書式")
+        self.assertEqual(new, "太字、文字色=#FF0000、塗りつぶし=単色、塗りつぶしの色=#FFFF00")
+        self.assertEqual(OOXML.parse_record('["B2","format","太字"]'), ("B2", OOXML.Cell("format", "太字")))
+        with self.assertRaises(OOXML.WorkbookError):
+            OOXML.parse_record('["B2","format",null]')
+
+    def test_builtin_codes_named_style_identity_and_unknown_properties(self):
+        xfs = ['<xf fontId="0" fillId="0" borderId="0" numFmtId="2" xfId="0"/>',
+               '<xf fontId="0" fillId="0" borderId="0" numFmtId="164" xfId="0"/>',
+               '<xf fontId="0" fillId="0" borderId="0" numFmtId="14" xfId="0"/>',
+               '<xf fontId="0" fillId="0" borderId="0" numFmtId="2" xfId="0" unusual="x"/>']
+        styles = styles_xml(xfs=xfs, num_fmts='<numFmts count="1"><numFmt numFmtId="164" formatCode="0.00"/></numFmts>')
+        base = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', styles))
+        self.assertEqual(base.stylesheet().canonical(0), base.stylesheet().canonical(1))
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 2) + '</row>', styles))
+        self.assertIn("組み込み14", base.compare_formats(source).texts(("1", "A1"))[1])
+        renamed = edit_xml(base.data, "xl/styles.xml", lambda root: root.find("{" + NS + "}cellStyles")[0].set("name", "標準"))
+        self.assertEqual(base.stylesheet().canonical(0), OOXML.Workbook(renamed).stylesheet().canonical(0))
+        unknown = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 3) + '</row>', styles))
+        self.assertTrue(base.compare_formats(unknown).differs(("1", "A1")))
+        self.assertIn("unusual", base.compare_formats(unknown).texts(("1", "A1"))[1])
+
+    def test_descriptions_escape_line_separators_and_disambiguate_collisions(self):
+        styles = styles_xml(fonts=['<font/>', '<font><name val="改行&#10;区切り&#x2028;&#x85;"/></font>'])
+        base = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', styles))
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', styles))
+        text = base.compare_formats(source).texts(("1", "A1"))[1]
+        self.assertIn(r"\u000a", text.lower())
+        self.assertIn(r"\u2028", text.lower())
+        self.assertIn(r"\u0085", text.lower())
+        # Sanitising a control and a literal escape must not make distinct formats identical.
+        literal_styles = styles_xml(fonts=['<font/>', r'<font><name val="改行\u000a区切り\u2028\u0085"/></font>'])
+        literal = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', literal_styles))
+        old, new = source.compare_formats(literal).texts(("1", "A1"))
+        self.assertNotEqual(old, new)
+        self.assertRegex(old, r"\[[0-9a-f]{8}\]$")
+        self.assertRegex(new, r"\[[0-9a-f]{8}\]$")
+
+    def test_identical_styles_reuse_index_without_touching_styles_or_workbook(self):
+        original = styled_book('<row r="1">' + style_cell("A1", 0) + '</row>')
+        base = OOXML.Workbook(original)
+        source = OOXML.Workbook(edit_xml(original, "xl/worksheets/sheet1.xml", lambda root: cell_node(root, "A1").set("s", "2")))
+        result = base.rebuild(source, set(), {("1", "A1")})
+        parts = package(result)
+        self.assertEqual(parts["xl/styles.xml"], package(original)["xl/styles.xml"])
+        self.assertEqual(parts["xl/workbook.xml"], package(original)["xl/workbook.xml"])
+        self.assertEqual(OOXML.Workbook(result).effective_style(("1", "A1")), 2)
+
+    def test_equivalent_xf_is_reused_without_rewriting_styles(self):
+        original = styled_book('<row r="1">' + style_cell("A1", 0) + '</row>')
+        base = OOXML.Workbook(original)
+        xfs = ['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+               '<xf fontId="2" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+               '<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"/>']
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 2) + '</row>', styles_xml(xfs=xfs)))
+        result = base.rebuild(source, set(), {("1", "A1")})
+        self.assertEqual(package(result)["xl/styles.xml"], package(original)["xl/styles.xml"])
+        self.assertEqual(OOXML.Workbook(result).effective_style(("1", "A1")), 1)
+
+    def test_value_and_format_can_be_rebuilt_independently(self):
+        original = styled_book('<row r="1">' + style_cell("A1", 1, "3") + '</row>')
+        base = OOXML.Workbook(original)
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 2, "5") + '</row>'))
+        key = ("1", "A1")
+        for values, formats, value, index in (({key}, set(), "5", 1), (set(), {key}, "3", 2), ({key}, {key}, "5", 2)):
+            with self.subTest(values=bool(values), formats=bool(formats)):
+                result = base.rebuild(source, values, formats)
+                actual = OOXML.Workbook(result)
+                self.assertEqual(actual.cells[key], OOXML.Cell("number", value))
+                self.assertEqual(actual.effective_style(key), index)
+                if not values:
+                    before = cell_node(etree.fromstring(package(original)["xl/worksheets/sheet1.xml"]), "A1")
+                    after = cell_node(etree.fromstring(package(result)["xl/worksheets/sheet1.xml"]), "A1")
+                    self.assertEqual([etree.tostring(child) for child in before], [etree.tostring(child) for child in after])
+
+    def test_format_rebuild_preserves_value_unsupported_cells(self):
+        cases = (
+            ('<row r="1"><c r="A1" t="inlineStr"><is><r><rPr><b/></rPr><t>rich</t></r></is></c></row>', "A1", ""),
+            ('<row r="1"><c r="A1"><f t="shared" si="0" ref="A1:B1">1</f><v>1</v></c><c r="B1"><f t="shared" si="0"/><v>1</v></c></row>', "B1", ""),
+            ('<row r="1"><c r="A1"><v>1</v></c><c r="B1"/></row>', "B1", '<mergeCells><mergeCell ref="A1:B1"/></mergeCells>'),
+        )
+        for sheet, coordinate, after in cases:
+            with self.subTest(coordinate=coordinate, sheet=sheet):
+                original = styled_book(sheet, after=after)
+                base = OOXML.Workbook(original)
+                source = OOXML.Workbook(edit_xml(original, "xl/worksheets/sheet1.xml", lambda root: cell_node(root, coordinate).set("s", "1")))
+                result = base.rebuild(source, set(), {("1", coordinate)})
+                self.assertEqual(OOXML.Workbook(result).effective_style(("1", coordinate)), 1)
+                before = cell_node(etree.fromstring(package(original)["xl/worksheets/sheet1.xml"]), coordinate)
+                actual = cell_node(etree.fromstring(package(result)["xl/worksheets/sheet1.xml"]), coordinate)
+                actual.attrib.pop("s", None)
+                self.assertEqual(etree.tostring(actual), etree.tostring(before))
+                with self.assertRaises(OOXML.WorkbookError):
+                    base.rebuild(source, {("1", coordinate)})
+
+    def test_format_rebuild_creates_and_drops_blank_cells_in_column_order(self):
+        original = styled_book('<row r="2">' + style_cell("A2", 1, None) + style_cell("D2", 1, None) + '</row>')
+        source_data = styled_book('<row r="2">' + style_cell("B2", 2, None) + style_cell("D2", 1, None) + '</row>'
+                                  '<row r="99">' + style_cell("Z99", 1, None) + '</row>')
+        base, source = OOXML.Workbook(original), OOXML.Workbook(source_data)
+        result = base.rebuild(source, set(), {("1", "A2"), ("1", "B2"), ("1", "Z99")})
+        root = etree.fromstring(package(result)["xl/worksheets/sheet1.xml"])
+        self.assertIsNone(cell_node(root, "A2"))
+        self.assertEqual([node.get("r") for node in root.find("{" + NS + "}sheetData")[0]], ["B2", "D2"])
+        self.assertEqual(root.find("{" + NS + "}dimension").get("ref"), "A1:Z99")
+        self.assertEqual(OOXML.Workbook(result).effective_style(("1", "Z99")), 1)
+
+    def test_value_import_preserves_inherited_row_and_column_styles(self):
+        before = '<cols><col min="1" max="3" style="1"/></cols>'
+        original = styled_book('<row r="1" customFormat="1" s="2"><c r="A1"><v>1</v></c></row>', before=before)
+        base = OOXML.Workbook(original)
+        source = OOXML.Workbook(styled_book('<row r="1" customFormat="1" s="2">' + style_cell("B1", 0, "2") + '</row>'
+                                          '<row r="2">' + style_cell("B2", 0, "3") + '</row>', before=before))
+        keys = {("1", "A1"), ("1", "B1"), ("1", "B2")}
+        result = OOXML.Workbook(base.rebuild(source, keys))
+        self.assertNotIn(("1", "A1"), result.cells)
+        self.assertEqual(result.effective_style(("1", "A1")), 0)
+        self.assertEqual(result.effective_style(("1", "B1")), 2)
+        self.assertEqual(result.effective_style(("1", "B2")), 1)
+
+    def test_value_import_reads_every_cols_element_and_ignores_invalid_column_styles(self):
+        # A worksheet may hold several <cols> elements; an invalid style is 0.
+        before = '<cols><col min="1" max="1" style="1"/></cols><cols><col min="2" max="2" style="x"/><col min="3" max="3" style="2"/></cols>'
+        original = styled_book('<row r="1"><c r="D1"><v>1</v></c></row>', before=before)
+        base = OOXML.Workbook(original)
+        source = OOXML.Workbook(styled_book('<row r="1"><c r="D1"><v>1</v></c></row><row r="5">' + style_cell("A5", 0, "1") +
+                                          style_cell("B5", 0, "2") + style_cell("C5", 0, "3") + '</row>', before=before))
+        result = base.rebuild(source, {("1", "A5"), ("1", "B5"), ("1", "C5")})
+        root = etree.fromstring(package(result)["xl/worksheets/sheet1.xml"])
+        self.assertEqual([cell_node(root, coordinate).get("s") for coordinate in ("A5", "B5", "C5")], ["1", None, "2"])
+        actual = OOXML.Workbook(result)
+        self.assertEqual([actual.effective_style(("1", coordinate)) for coordinate in ("A5", "B5", "C5")], [1, 0, 2])
+
+    def test_overlapping_column_styles_resolve_alike_when_loading_and_rebuilding(self):
+        # Overlapping <col> ranges are invalid, but must not split the loader and the rebuild.
+        before = '<cols><col min="1" max="5" style="1"/><col min="3" max="3" style="2"/></cols>'
+        original = styled_book('<row r="1"><c r="A1"><v>1</v></c></row>', before=before)
+        source = OOXML.Workbook(styled_book('<row r="1"><c r="A1"><v>1</v></c></row><row r="5">' +
+                                          style_cell("C5", 2, "3") + '</row>', before=before))
+        result = OOXML.Workbook(OOXML.Workbook(original).rebuild(source, {("1", "C5")}))
+        self.assertEqual(result.effective_style(("1", "C5")), 2)
+
+    def test_border_outline_is_described_as_a_boolean(self):
+        self.assertEqual(OOXML._description({"border.outline": False}, {}, {}), "罫線の外枠なし")
+        self.assertEqual(OOXML._description({}, {"border.outline": False}, {}), "罫線の外枠あり")
+
+    def test_import_appends_components_named_style_and_uses_unused_numfmt_id(self):
+        target_styles = styles_xml(extra='<dxfs count="1"><dxf><numFmt numFmtId="205" formatCode="0.0"/></dxf></dxfs>')
+        original = styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', target_styles)
+        original = replace_parts(original, {"xl/pivotTables/pivotTable1.xml": b'<pivotTableDefinition numFmtId="301"/>'})
+        source_styles = styles_xml(
+            fonts=['<font/>', '<font><name val="Arial"/><b/></font>'],
+            fills=['<fill><patternFill/></fill>', '<fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>'],
+            borders=['<border/>', '<border><left style="thin"><color rgb="FF0000FF"/></left></border>'],
+            xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+                 '<xf fontId="1" fillId="1" borderId="1" numFmtId="164" xfId="1" applyFont="1"/>'],
+            style_xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0"/>',
+                       '<xf fontId="1" fillId="1" borderId="1" numFmtId="164"/>'],
+            cell_styles=['<cellStyle name="Normal" xfId="0" builtinId="0"/>', '<cellStyle name="売上形式" xfId="1"/>'],
+            num_fmts='<numFmts count="1"><numFmt numFmtId="164" formatCode="0.000"/></numFmts>')
+        base = OOXML.Workbook(original)
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', source_styles))
+        result = base.rebuild(source, set(), {("1", "A1")})
+        updated = package(result)["xl/styles.xml"]
+        OOXML._check_styles_appended(target_styles, updated)
+        root = etree.fromstring(updated)
+        for name in ("numFmts", "fonts", "fills", "borders", "cellStyleXfs", "cellXfs", "cellStyles"):
+            container = root.find("{" + NS + "}" + name)
+            self.assertEqual(int(container.get("count")), len(container), name)
+        self.assertEqual(root.find("{" + NS + "}numFmts")[0].get("numFmtId"), "302")
+        actual = OOXML.Workbook(result)
+        self.assertEqual(actual.stylesheet().exact(actual.effective_style(("1", "A1"))), source.stylesheet().exact(1))
+        book = load_workbook(io.BytesIO(result))
+        self.assertEqual(book["売上"]["A1"].number_format, "0.000")
+        self.assertTrue(book["売上"]["A1"].font.bold)
+        self.assertEqual(book["売上"]["A1"].fill.fgColor.rgb[-6:], "FF0000")
+        self.assertEqual(book["売上"]["A1"].border.left.style, "thin")
+        self.assertEqual(book["売上"]["A1"].style, "売上形式")
+        book.close()
+
+    def test_validation_rejects_wrong_missing_added_and_unselected_styles(self):
+        original = styled_book('<row r="1">' + style_cell("A1", 0, None) + style_cell("B1", 1) + '</row>')
+        base = OOXML.Workbook(original)
+        source = OOXML.Workbook(edit_xml(original, "xl/worksheets/sheet1.xml", lambda root: cell_node(root, "A1").set("s", "2")))
+        original_set = OOXML.Workbook._set_style
+        for corruption in ("wrong", "missing", "added", "unselected", "row", "column"):
+            def broken_set(book, data, rows, coordinate, index):
+                if corruption == "wrong":
+                    return
+                original_set(book, data, rows, coordinate, index)
+                if corruption == "missing":
+                    node = cell_node(data, coordinate)
+                    node.getparent().remove(node)
+                elif corruption == "added":
+                    original_set(book, data, rows, "Z99", 1)
+                elif corruption == "unselected":
+                    original_set(book, data, rows, "B1", 2)
+                elif corruption == "row":
+                    row = data.find("{" + NS + "}row")
+                    row.set("s", "1")
+                    row.set("customFormat", "1")
+                elif corruption == "column":
+                    columns = etree.Element("{" + NS + "}cols")
+                    etree.SubElement(columns, "{" + NS + "}col", min="1", max="2", style="1")
+                    data.getparent().insert(1, columns)
+
+            with self.subTest(corruption=corruption), mock.patch.object(OOXML.Workbook, "_set_style", broken_set):
+                with self.assertRaises(OOXML.WorkbookError):
+                    base.rebuild(source, set(), {("1", "A1")})
+        with mock.patch.object(OOXML._StyleImporter, "index_for", return_value=0):
+            with self.assertRaises(OOXML.WorkbookError):
+                base.rebuild(source, set(), {("1", "A1")})
+
+    def test_styles_append_validation_rejects_existing_entry_and_dxf_changes(self):
+        original = styles_xml(extra='<dxfs count="1"><dxf><font><b/></font></dxf></dxfs>')
+        for name in ("fonts", "cellXfs", "dxfs"):
+            root = etree.fromstring(original)
+            container = root.find("{" + NS + "}" + name)
+            container[0].set("corrupt", "1")
+            with self.subTest(name=name), self.assertRaises(OOXML.WorkbookError):
+                OOXML._check_styles_appended(original, etree.tostring(root))
+
+    def test_unsupported_formats_report_extensions_invalid_indices_and_missing_components(self):
+        original = styled_book('<row r="1">' + style_cell("A1", 0) + '</row>')
+        base = OOXML.Workbook(original)
+        unsupported = (
+            ('<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"><extLst/></xf>', None),
+            ('<xf fontId="99" fillId="0" borderId="0" numFmtId="0" xfId="0"/>', None),
+            ('<xf fontId="1" fillId="0" borderId="0" numFmtId="164" xfId="0"/>', None),
+            ('<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"/>', ['<font/>', '<font><b/><x:feature xmlns:x="urn:extra"/></font>']),
+        )
+        for xf, fonts in unsupported:
+            styles = styles_xml(fonts=fonts, xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>', xf])
+            source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', styles))
+            with self.subTest(xf=xf, fonts=fonts):
+                self.assertTrue(base.compare_formats(source).unsupported_reason(("1", "A1")))
+                with self.assertRaisesRegex(OOXML.WorkbookError, "売上!A1 の書式は反映できません"):
+                    base.rebuild(source, set(), {("1", "A1")})
+        for index in ("99", "-1", "invalid"):
+            source = OOXML.Workbook(edit_xml(original, "xl/worksheets/sheet1.xml", lambda root: cell_node(root, "A1").set("s", index)))
+            with self.subTest(index=index):
+                self.assertTrue(base.compare_formats(source).unsupported_reason(("1", "A1")))
+        missing = package(original)
+        del missing["xl/styles.xml"]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, content in missing.items():
+                archive.writestr(name, content)
+        target = OOXML.Workbook(output.getvalue())
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>'))
+        self.assertTrue(target.compare_formats(source).unsupported_reason(("1", "A1")))
+
+
+    def test_exact_existing_xf_allows_noncopyable_components_but_not_xf_extensions(self):
+        fonts = ['<font/>', '<font><b/><x:feature xmlns:x="urn:extra"/></font>']
+        styles = styles_xml(fonts=fonts)
+        original = styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', styles)
+        base = OOXML.Workbook(original)
+        source_styles = styles.replace(b'</styleSheet>', b'<!-- different bytes --></styleSheet>')
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', source_styles))
+        self.assertIsNone(base.compare_formats(source).unsupported_reason(("1", "A1")))
+        result = base.rebuild(source, set(), {("1", "A1")})
+        self.assertEqual(package(result)["xl/styles.xml"], styles)
+        extended_styles = styles_xml(xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+                                          '<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="0"><extLst/></xf>'])
+        target = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', extended_styles))
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', extended_styles))
+        self.assertTrue(target.compare_formats(source).unsupported_reason(("1", "A1")))
+
+    def test_indexed_palette_default_is_normalised_and_custom_mismatch_is_blocked(self):
+        default_colors = etree.fromstring(package(book_bytes())["xl/styles.xml"]).find("{" + NS + "}colors")
+        self.assertIsNotNone(default_colors)
+        fonts = ['<font/>', '<font><b/><color indexed="2"/></font>']
+        target = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', styles_xml(fonts=fonts, xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>'])))
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', styles_xml(fonts=fonts, extra=etree.tostring(default_colors).decode())))
+        self.assertIsNone(target.compare_formats(source).unsupported_reason(("1", "A1")))
+        default_colors[0][2].set("rgb", "FF123456")
+        custom = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', styles_xml(fonts=fonts, extra=etree.tostring(default_colors).decode())))
+        self.assertTrue(target.compare_formats(custom).unsupported_reason(("1", "A1")))
+
+    def test_named_style_name_clash_is_blocked(self):
+        target_styles = styles_xml(cell_styles=['<cellStyle name="Normal" xfId="0" builtinId="0"/>',
+                                               '<cellStyle name="Report" xfId="0" builtinId="1"/>'])
+        source_styles = styles_xml(style_xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0"/>',
+                                             '<xf fontId="1" fillId="0" borderId="0" numFmtId="0"/>'],
+                                  cell_styles=['<cellStyle name="Normal" xfId="0" builtinId="0"/>', '<cellStyle name="report" xfId="1"/>'],
+                                  xfs=['<xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>',
+                                       '<xf fontId="1" fillId="0" borderId="0" numFmtId="0" xfId="1"/>'])
+        target = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 0) + '</row>', target_styles))
+        source = OOXML.Workbook(styled_book('<row r="1">' + style_cell("A1", 1) + '</row>', source_styles))
+        self.assertTrue(target.compare_formats(source).unsupported_reason(("1", "A1")))
+
+
+    def test_cell_style_storage_normalises_zero_and_retains_invalid_indices(self):
+        cells = ''.join(style_cell(coordinate, index) for coordinate, index in (
+            ("A1", "00"), ("B1", "+0"), ("C1", "invalid"), ("D1", "-1"),
+        ))
+        book = OOXML.Workbook(styled_book('<row r="1">' + cells + '</row>'))
+        self.assertEqual(book.cell_styles, {("1", "C1"): -1, ("1", "D1"): -1})
+        self.assertEqual(book.effective_style(("1", "A1")), 0)
+        self.assertEqual(book.effective_style(("1", "B1")), 0)
+        for coordinate in ("C1", "D1"):
+            self.assertEqual(book.effective_style(("1", coordinate)), -1)
+
+    def test_style_storage_and_canonical_cache_scale_with_styles_not_cell_count(self):
+        cells = []
+        styled = 0
+        for row in range(1, 20001):
+            index = row % 3
+            styled += bool(index)
+            cells.append('<row r="' + str(row) + '">' + style_cell("A" + str(row), index) + '</row>')
+        data = styled_book(''.join(cells))
+        base, source = OOXML.Workbook(data), OOXML.Workbook(data)
+        self.assertEqual(len(base.cells), 20000 + 1)  # The fixture retains one cell in sheet 2.
+        self.assertEqual(len(base.cell_styles), styled)
+        self.assertTrue(all(next(key for key in base.cells if key == style_key) is style_key for style_key in list(base.cell_styles)[:20]))
+        calls = []
+        original_fields = OOXML._Styles._fields
+
+        def fields(styles, index):
+            calls.append((id(styles), index))
+            return original_fields(styles, index)
+
+        with mock.patch.object(OOXML._Styles, "_fields", fields):
+            comparison = base.compare_formats(source)
+            self.assertEqual(list(comparison.keys()), [])
+            for row in range(1, 100):
+                self.assertFalse(comparison.differs(("1", "A" + str(row))))
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertLessEqual(len(calls), 3)
+        self.assertEqual(len({identifier for identifier, _ in calls}), 1)
 
 
 if __name__ == "__main__":
