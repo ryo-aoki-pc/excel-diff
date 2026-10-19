@@ -2,6 +2,7 @@
 """Excel のセル変更を delta の左右比較で選び、Excel のまま部分ステージする。"""
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import io
 from itertools import zip_longest
@@ -24,6 +25,140 @@ class StageError(ValueError):
 
 
 SUPPORTED = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+WORD_SUPPORTED = {".docx", ".docm", ".dotx", ".dotm"}
+EXCEL_FAMILY = SUPPORTED | {".xls", ".xlt", ".xlsb"}
+
+
+_TEXTS = {
+    "excel": {
+        "reading_stage": "Excel を読み込んでいます。大きいブックでは選択画面が開くまで時間がかかります。",
+        "reading_merge": "Excel を読み込んでいます。大きいブックでは画面が開くまで時間がかかります。",
+        "outside": "リポジトリ内の Excel を指定してください。",
+        "untracked": "追跡済みで競合のない Excel を選んでください。新規ファイルは全体をステージします。",
+        "irregular": "通常の Excel ファイルだけを部分ステージできます。",
+        "new_file": "新規ファイルは Excel 全体をステージしてください。既存ファイルのセル変更が対象です。",
+        "index_commit": "現在の Excel インデックス",
+        "merge_commit": "取り込み先の Excel",
+        "snapshots_changed": "選択開始時の Excel が変更されています。画面を閉じて選び直してください。",
+        "index_changed": "対象 Excel のインデックスが変更されています。画面を閉じて選び直してください。",
+        "work_changed": "作業ファイルが選択開始後に変更されています。画面を閉じて選び直してください。",
+        "open_elsewhere": "取り込み先を Excel などで開いているなら閉じてからやり直してください: ",
+        "open_retry": "取り込み先を Excel などで開いているなら閉じてから再試行してください: ",
+        "merge_suffix": "取り込みの対象は .xlsx / .xlsm / .xltx / .xltm です: ",
+        "staged": "{} セルを Excel のままステージしました。q で元の画面へ戻ってください。",
+        "nothing_selected": "セル変更が選択されていません。Enter・Space でハンクを選び、X で反映してください。",
+        "stage_done": "Excel の部分ステージを反映しました。",
+        "stage_cancelled": "選択を取り消しました。Excel のインデックスは変更していません。",
+        "stage_failed": "Excel の部分ステージに失敗しました: ",
+        "merged_picker": "{} セルを取り込み先へ書き込みました。q で元の画面へ戻ってください。",
+        "merged": "{} セルを取り込み先へ書き込みました: ",
+        "merge_nothing": "取り込むセルが選ばれていません。取り込み先は変えていません。",
+        "merge_failed": "Excel の取り込みに失敗しました: ",
+        "no_difference": "差分がありません。取り込み先は変えていません。",
+        "only_unsupported": "取り込める差分がありません（取り込めない違い {} セル）。取り込み先は変えていません。",
+        "unsupported_merge": "取り込めない違い（{} セル）: ",
+        "more": "、ほか {} セル",
+        "winmerge_hint": "WinMerge で、取り込むセルの行を右から左へコピーし、上書き保存（Ctrl+S）してから WinMerge の窓を閉じてください。",
+        "picker_hint": "専用画面で、取り込むハンクを Enter → Space で選び、X で書き込んでください。q で閉じると取り消します。",
+        "picker_stage": "選択セルを Excel へステージ (反映後 q で戻る)",
+        "picker_merge": "選択セルを取り込み先へ書き込む (反映後 q で戻る)",
+        "title_stage": "Excel の部分ステージ",
+        "title_merge": "Excel の取り込み",
+        "stage_prefix": "lazygit-excel-stage-",
+        "merge_prefix": "excel-merge-",
+        "replace_prefix": ".excel-merge-",
+        "identity_name": "Excel staging",
+        "identity_email": "excel-stage@example.invalid",
+    },
+    "word": {
+        "reading_stage": "Word を読み込んでいます。大きい文書では選択画面が開くまで時間がかかります。",
+        "reading_merge": "Word を読み込んでいます。大きい文書では画面が開くまで時間がかかります。",
+        "outside": "リポジトリ内の Word を指定してください。",
+        "untracked": "追跡済みで競合のない Word を選んでください。新規ファイルは全体をステージします。",
+        "irregular": "通常の Word ファイルだけを部分ステージできます。",
+        "new_file": "新規ファイルは Word 全体をステージしてください。既存ファイルの変更が対象です。",
+        "index_commit": "現在の Word インデックス",
+        "merge_commit": "取り込み先の Word",
+        "snapshots_changed": "選択開始時の Word が変更されています。画面を閉じて選び直してください。",
+        "index_changed": "対象 Word のインデックスが変更されています。画面を閉じて選び直してください。",
+        "work_changed": "作業ファイルが選択開始後に変更されています。画面を閉じて選び直してください。",
+        "open_elsewhere": "取り込み先を Word などで開いているなら閉じてからやり直してください: ",
+        "open_retry": "取り込み先を Word などで開いているなら閉じてから再試行してください: ",
+        "merge_suffix": "取り込みの対象は .docx / .docm / .dotx / .dotm です: ",
+        "staged": "{} か所の変更を Word のままステージしました。q で元の画面へ戻ってください。",
+        "nothing_selected": "変更が選択されていません。Enter・Space でハンクを選び、X で反映してください。",
+        "stage_done": "Word の部分ステージを反映しました。",
+        "stage_cancelled": "選択を取り消しました。Word のインデックスは変更していません。",
+        "stage_failed": "Word の部分ステージに失敗しました: ",
+        "merged_picker": "{} か所の変更を取り込み先へ書き込みました。q で元の画面へ戻ってください。",
+        "merged": "{} か所の変更を取り込み先へ書き込みました: ",
+        "merge_nothing": "取り込む変更が選ばれていません。取り込み先は変えていません。",
+        "merge_failed": "Word の取り込みに失敗しました: ",
+        "no_difference": "差分がありません。取り込み先は変えていません。",
+        "only_unsupported": "取り込める差分がありません（取り込めない違い {} か所）。取り込み先は変えていません。",
+        "unsupported_merge": "取り込めない違い（{} か所）: ",
+        "unsupported_stage": "部分ステージできない違い（{} か所）: ",
+        "more": "、ほか {} か所",
+        "winmerge_hint": "WinMerge で、取り込む行を右から左へコピーし、上書き保存（Ctrl+S）してから WinMerge の窓を閉じてください。",
+        "picker_hint": "専用画面で、取り込むハンクを Enter → Space で選び、X で書き込んでください。q で閉じると取り消します。",
+        "picker_stage": "選択した変更を Word へステージ (反映後 q で戻る)",
+        "picker_merge": "選択した変更を取り込み先へ書き込む (反映後 q で戻る)",
+        "title_stage": "Word の部分ステージ",
+        "title_merge": "Word の取り込み",
+        "stage_prefix": "lazygit-word-stage-",
+        "merge_prefix": "word-merge-",
+        "replace_prefix": ".word-merge-",
+        "identity_name": "Word staging",
+        "identity_email": "word-stage@example.invalid",
+    },
+}
+
+
+def _kind(path):
+    return "word" if Path(path).suffix.lower() in WORD_SUPPORTED else "excel"
+
+
+def _session_kind(directory):
+    try:
+        state = json.loads((Path(directory) / "session.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "excel"
+    return "word" if isinstance(state, dict) and state.get("format") == "word" else "excel"
+
+
+def _word_module():
+    try:
+        import word_stage_ooxml
+    except ImportError as error:
+        raise StageError("Word 用のモジュールを読み込めません。setup-excel-diff.py を再実行してください: " + str(error)) from error
+    return word_stage_ooxml
+
+
+@contextmanager
+def _word_errors():
+    module = _word_module()
+    try:
+        yield module
+    except module.word.DocumentError as error:
+        raise StageError(str(error)) from error
+
+
+def _word_unsupported(comparison):
+    return [item._asdict() for item in comparison.unsupported]
+
+
+def _build_word_picker(directory, comparison, message, staging=False):
+    units = [{"id": story.id, "title": story.title} for story in comparison.stories]
+    baseline = {story.id: story.baseline for story in comparison.stories}
+    changed = {story.id: story.raw_changed if staging else story.changed for story in comparison.stories}
+    texts = _TEXTS["word"]
+    return _build_picker_files(directory, units, baseline, changed, message, ".word.txt",
+                               (texts["identity_name"], texts["identity_email"]))
+
+
+def _report_word_swaps(comparison):
+    if comparison.last_swaps:
+        print("目次などの参照先に合わせて、表示が同じ {} か所を取り込み元のものにしました。".format(comparison.last_swaps))
 
 
 def isolated_env():
@@ -65,11 +200,12 @@ def entries(repo, env, path=None):
 
 
 def workbook_entry(repo, path, env):
+    texts = _TEXTS[_kind(path)]
     rows = entries(repo, env, path)
     if len(rows) != 1 or rows[0][0] != path or rows[0][3] != "0":
-        raise StageError("追跡済みで競合のない Excel を選んでください。新規ファイルは全体をステージします。")
+        raise StageError(texts["untracked"])
     if rows[0][1] not in ("100644", "100755"):
-        raise StageError("通常の Excel ファイルだけを部分ステージできます。")
+        raise StageError(texts["irregular"])
     return rows[0][1], rows[0][2]
 
 
@@ -83,13 +219,15 @@ def prepare_session(repo, relative, directory, progress=None):
     """Capture the workbook pair and create the isolated text selection repo."""
     repo, directory = Path(repo).resolve(), Path(directory).resolve()
     relative = str(relative)
-    if Path(relative).suffix.lower() not in SUPPORTED:
-        raise StageError("部分ステージの対象は .xlsx / .xlsm / .xltx / .xltm です。それ以外のファイルは全体をステージしてください。")
+    kind = _kind(relative)
+    texts = _TEXTS[kind]
+    if kind == "excel" and Path(relative).suffix.lower() not in SUPPORTED:
+        raise StageError("部分ステージの対象は Excel（.xlsx / .xlsm / .xltx / .xltm）と Word（.docx / .docm / .dotx / .dotm）です。それ以外のファイルは全体をステージしてください。")
     work_path = repo / relative
     try:
         normalized = work_path.resolve().relative_to(repo).as_posix()
     except ValueError:
-        raise StageError("リポジトリ内の Excel を指定してください。")
+        raise StageError(texts["outside"])
     if work_path.is_symlink() or not work_path.is_file():
         raise StageError("削除されたファイルやリンクは部分ステージできません。")
     relative = normalized
@@ -99,15 +237,27 @@ def prepare_session(repo, relative, directory, progress=None):
     mode, oid = workbook_entry(repo, relative, env)
     head = git(repo, "ls-tree", "-z", "HEAD", "--", relative, env=env, check=False)
     if head.returncode or not head.stdout:
-        raise StageError("新規ファイルは Excel 全体をステージしてください。既存ファイルのセル変更が対象です。")
+        raise StageError(texts["new_file"])
     base_data = git(repo, "cat-file", "blob", oid, env=env).stdout
     work_data = work_path.read_bytes()
     if progress is not None:
         # Reading a large workbook takes seconds with nothing else on screen.
-        progress("Excel を読み込んでいます。大きいブックでは選択画面が開くまで時間がかかります。")
+        progress(texts["reading_stage"])
+    if kind == "word":
+        with _word_errors() as module:
+            comparison = module.compare(base_data, work_data)
+        _save_snapshots(directory, base_data, work_data, ".docx")
+        parts = _build_word_picker(directory, comparison, texts["index_commit"], staging=True)
+        state = {"format": "word", "repo": str(repo), "path": relative, "index": str(index), "mode": mode,
+                 "oid": oid, "base_sha256": hashlib.sha256(base_data).hexdigest(),
+                 "work_sha256": hashlib.sha256(work_data).hexdigest(), "parts": parts,
+                 "differences": comparison.differences, "unsupported": _word_unsupported(comparison),
+                 "selectable": comparison.selectable, "target": "index", "applied": False}
+        write_json(directory / "session.json", state)
+        return state
     base, work, baseline, changed = _load_books(base_data, work_data)
     _save_snapshots(directory, base_data, work_data)
-    sheets = _build_picker(directory, base, baseline, changed, "現在の Excel インデックス")
+    sheets = _build_picker(directory, base, baseline, changed, texts["index_commit"])
     state = {"repo": str(repo), "path": relative, "index": str(index), "mode": mode,
              "oid": oid, "base_sha256": hashlib.sha256(base_data).hexdigest(),
              "work_sha256": hashlib.sha256(work_data).hexdigest(),
@@ -122,18 +272,25 @@ def _load_books(base_data, work_data):
     return base, work, base.projection(work), work.projection(base)
 
 
-def _save_snapshots(directory, base_data, work_data):
+def _save_snapshots(directory, base_data, work_data, suffix=".xlsx"):
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "base.xlsx").write_bytes(base_data)
-    (directory / "work.xlsx").write_bytes(work_data)
+    (directory / ("base" + suffix)).write_bytes(base_data)
+    (directory / ("work" + suffix)).write_bytes(work_data)
 
 
 def _build_picker(directory, base, baseline, changed, message):
+    units = [{"id": sheet.id, "name": sheet.name} for sheet in base.sheets]
+    texts = _TEXTS["excel"]
+    return _build_picker_files(directory, units, baseline, changed, message, ".cells.txt",
+                               (texts["identity_name"], texts["identity_email"]))
+
+
+def _build_picker_files(directory, units, baseline, changed, message, suffix, identity):
     picker = directory / "picker"
     picker.mkdir()
     picker_env = isolated_env()
     git(picker, "init", "--quiet", "--template=", env=picker_env)
-    options = {"user.name": "Excel staging", "user.email": "excel-stage@example.invalid",
+    options = {"user.name": identity[0], "user.email": identity[1],
                "core.autocrlf": "false", "core.quotePath": "false", "core.attributesFile": os.devnull,
                "core.hooksPath": str(directory / "no-hooks"), "core.fsmonitor": "false",
                "commit.gpgSign": "false", "tag.gpgSign": "false"}
@@ -142,11 +299,13 @@ def _build_picker(directory, base, baseline, changed, message):
     baseline_directory = directory / "baseline"
     baseline_directory.mkdir(exist_ok=True)
     sheets = []
-    for number, sheet in enumerate(base.sheets, 1):
-        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", sheet.name).strip(" .") or "Sheet"
-        filename = "{:03d}-{}.cells.txt".format(number, safe_name)
-        baseline_data = baseline[sheet.id].encode("utf-8")
-        sheets.append({"id": sheet.id, "name": sheet.name, "filename": filename,
+    for number, unit in enumerate(units, 1):
+        title_key = "title" if "title" in unit else "name"
+        title = unit[title_key]
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .") or ("Part" if title_key == "title" else "Sheet")
+        filename = "{:03d}-{}".format(number, safe_name) + suffix
+        baseline_data = baseline[unit["id"]].encode("utf-8")
+        sheets.append({"id": unit["id"], title_key: title, "filename": filename,
                        "baseline_sha256": hashlib.sha256(baseline_data).hexdigest()})
         # Keep the trusted original projection outside the editable picker repo.
         (baseline_directory / filename).write_bytes(baseline_data)
@@ -225,20 +384,58 @@ def selected_cells(directory, state, base, work):
     return selected
 
 
+def _session_word_comparison(directory, state):
+    if "base_sha256" not in state or "work_sha256" not in state:
+        raise StageError("選択画面の形式が更新されています。画面を閉じて選び直してください。")
+    base_data = (directory / "base.docx").read_bytes()
+    work_data = (directory / "work.docx").read_bytes()
+    if (hashlib.sha256(base_data).hexdigest() != state["base_sha256"] or
+            hashlib.sha256(work_data).hexdigest() != state["work_sha256"]):
+        raise StageError(_TEXTS["word"]["snapshots_changed"])
+    with _word_errors() as module:
+        return module.compare(base_data, work_data)
+
+
+def selected_word(directory, state, comparison):
+    picker, env = directory / "picker", isolated_env()
+    rows = entries(picker, env)
+    names = {part["filename"] for part in state["parts"]}
+    if {row[0] for row in rows} != names or any(row[1] != "100644" or row[3] != "0" for row in rows):
+        raise StageError("選択画面のファイルが削除・追加・競合しています。変更のハンクだけを選んでください。")
+    if [part["id"] for part in state["parts"]] != [story.id for story in comparison.stories]:
+        raise StageError("選択開始時の射影が Word 文書と一致しません。画面を閉じて選び直してください。")
+    selected = set()
+    for part, story in zip(state["parts"], comparison.stories):
+        if "baseline_sha256" not in part:
+            raise StageError("選択画面の形式が更新されています。画面を閉じて選び直してください。")
+        baseline = (directory / "baseline" / part["filename"]).read_bytes()
+        if hashlib.sha256(baseline).hexdigest() != part["baseline_sha256"]:
+            raise StageError("選択開始時の射影が変更されています。画面を閉じて選び直してください。")
+        if baseline != story.baseline.encode("utf-8"):
+            raise StageError("選択開始時の射影が Word 文書と一致しません。画面を閉じて選び直してください。")
+        staged = git(picker, "show", ":" + part["filename"], env=env).stdout.decode("utf-8").splitlines()
+        with _word_errors():
+            selected.update(comparison.choose(story.id, staged,
+                                              projection="changed" if state.get("target") == "file" else "raw_changed"))
+    return selected
+
+
 def assert_work_unchanged(repo, state):
+    texts = _TEXTS[state.get("format", "excel")]
     path = repo / state["path"]
     if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != state["work_sha256"]:
-        raise StageError("作業ファイルが選択開始後に変更されています。画面を閉じて選び直してください。")
+        raise StageError(texts["work_changed"])
 
 
 def _session_books(directory, state):
+    texts = _TEXTS[state.get("format", "excel")]
     if "base_sha256" not in state:
         raise StageError("選択画面の形式が更新されています。画面を閉じて選び直してください。")
     base_data = (directory / "base.xlsx").read_bytes()
     work_data = (directory / "work.xlsx").read_bytes()
     if (hashlib.sha256(base_data).hexdigest() != state["base_sha256"] or
             hashlib.sha256(work_data).hexdigest() != state["work_sha256"]):
-        raise StageError("選択開始時の Excel が変更されています。画面を閉じて選び直してください。")
+        raise StageError(texts["snapshots_changed"])
     base, work = Workbook(base_data), Workbook(work_data)
     return base, work
 
@@ -248,15 +445,25 @@ def apply_session(directory):
     directory = Path(directory).resolve()
     state_path = directory / "session.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
+    texts = _TEXTS[state.get("format", "excel")]
     if state.get("target", "index") != "index":
         raise StageError("取り込みの選択画面は部分ステージに使えません。")
     if state["applied"]:
         raise StageError("この選択は反映済みです。q で戻り、E で新しく開いてください。")
-    base, work = _session_books(directory, state)
-    selected = selected_cells(directory, state, base, work)
+    word_session = state.get("format") == "word"
+    if word_session:
+        comparison = _session_word_comparison(directory, state)
+        selected = selected_word(directory, state, comparison)
+    else:
+        base, work = _session_books(directory, state)
+        selected = selected_cells(directory, state, base, work)
     if not selected:
         return 0
-    rebuilt = base.rebuild(work, selected)
+    if word_session:
+        with _word_errors():
+            rebuilt = comparison.rebuild(selected)
+    else:
+        rebuilt = base.rebuild(work, selected)
     repo, index = Path(state["repo"]), Path(state["index"])
     assert_work_unchanged(repo, state)
     lock = Path(str(index) + ".lock")
@@ -269,7 +476,7 @@ def apply_session(directory):
         env = source_env(index)
         mode, oid = workbook_entry(repo, state["path"], env)
         if (mode, oid) != (state["mode"], state["oid"]):
-            raise StageError("対象 Excel のインデックスが変更されています。画面を閉じて選び直してください。")
+            raise StageError(texts["index_changed"])
         shutil.copyfile(index, lock)
         os.chmod(lock, stat.S_IMODE(index.stat().st_mode))
         new_oid = git(repo, "hash-object", "-w", "--no-filters", "--stdin", env=env, data=rebuilt).stdout.decode("ascii").strip()
@@ -278,6 +485,8 @@ def apply_session(directory):
         os.replace(lock, index)
         state["applied"] = True
         write_json(state_path, state)
+        if word_session:
+            _report_word_swaps(comparison)
         return len(selected)
     finally:
         if lock.exists():
@@ -298,6 +507,7 @@ def check_tools():
 
 
 def picker_config(directory, merge=False):
+    texts = _TEXTS[_session_kind(directory)]
     # JSON is also valid YAML; no YAML dependency or per-machine paths in the
     # synced outer config. Paths here exist only for this private session.
     helper = Path(__file__).resolve()
@@ -315,10 +525,14 @@ def picker_config(directory, merge=False):
              "name": "delta side-by-side"}, {"type": "rawGit", "name": "default"}]},
         "update": {"method": "never"}, "disableStartupPopups": True,
         "customCommands": [{"key": "X", "context": "global", "command": command,
-                            "description": ("選択セルを取り込み先へ書き込む (反映後 q で戻る)" if merge else
-                                            "選択セルを Excel へステージ (反映後 q で戻る)"),
-                            "output": "popup", "outputTitle": "Excel の取り込み" if merge else "Excel の部分ステージ"}],
+                            "description": (texts["picker_merge"] if merge else
+                                            texts["picker_stage"]),
+                            "output": "popup", "outputTitle": texts["title_merge"] if merge else texts["title_stage"]}],
     }
+    if _session_kind(directory) == "word":
+        config["git"]["diffRenderers"].insert(0, {
+            "command": "delta --no-gitconfig --dark --paging=never --syntax-theme=none --tabs=4 --side-by-side --wrap-max-lines=unlimited",
+            "name": "delta side-by-side wrapped"})
     path = directory / "config.json"
     write_json(path, config)
     return path
@@ -389,6 +603,7 @@ def resolve_user_path(value):
 
 def check_target_writable(path):
     path = Path(path)
+    texts = _TEXTS[_kind(path)]
     try:
         attributes = path.lstat()
     except FileNotFoundError:
@@ -404,7 +619,7 @@ def check_target_writable(path):
             descriptor = os.open(path, os.O_RDWR)
             os.close(descriptor)
         except PermissionError as error:
-            raise PermissionError("取り込み先を Excel などで開いているなら閉じてからやり直してください: " + str(path)) from error
+            raise PermissionError(texts["open_elsewhere"] + str(path)) from error
     elif (path.parent / (".~lock." + path.name + "#")).exists():
         raise StageError("LibreOffice のロックファイルがあります。取り込み先を閉じてください: " + str(path))
     return attributes
@@ -465,11 +680,78 @@ def _winmerge_text(base, projection):
     return ("\ufeff" + "\n".join(pieces) + "\n").encode("utf-8")
 
 
+def _merge_kind(target, source):
+    word_paths = [path for path in (target, source) if _kind(path) == "word"]
+    if len(word_paths) == 2:
+        return "word"
+    if word_paths:
+        other = source if _kind(target) == "word" else target
+        if Path(other).suffix.lower() in EXCEL_FAMILY:
+            raise StageError("Excel と Word は混ぜて取り込めません。同じ種類のファイルを 2 つ指定してください。")
+        raise StageError(_TEXTS["word"]["merge_suffix"] + str(other))
+    return "excel"
+
+
+_WORD_WINMERGE_HEADERS = (
+    "# 右（取り込み元）から左（取り込み先）へ、取り込む行をコピーする",
+    "# 上書き保存（Ctrl+S）してから WinMerge を閉じると、取り込み先の文書に書き込む",
+)
+
+
+def _word_winmerge_text(comparison, projection="baseline"):
+    pieces = [*_WORD_WINMERGE_HEADERS]
+    for number, story in enumerate(comparison.stories, 1):
+        title = json.dumps(story.title, ensure_ascii=False)
+        title = title.replace("\x85", "\\u0085").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+        pieces.append("# 部分 " + str(number) + ": " + title)
+        text = getattr(story, projection)
+        pieces.extend(text.rstrip("\n").split("\n") if text else [])
+    return ("\ufeff" + "\n".join(pieces) + "\n").encode("utf-8")
+
+
+def _prepare_word_merge_session(target, source, directory, tool="lazygit"):
+    check_target_writable(target)
+    if not source.is_file():
+        raise StageError("取り込み元は通常のファイルを指定してください: " + str(source))
+    if _same_file(target, source):
+        raise StageError("取り込み先と取り込み元が同じファイルです。")
+    base_data, work_data = target.read_bytes(), source.read_bytes()
+    with _word_errors() as module:
+        comparison = module.compare(base_data, work_data)
+    _save_snapshots(directory, base_data, work_data, ".docx")
+    state = {"format": "word", "target": "file", "tool": tool, "path": str(target), "source": str(source),
+             "base_sha256": hashlib.sha256(base_data).hexdigest(),
+             "work_sha256": hashlib.sha256(work_data).hexdigest(),
+             "differences": comparison.differences, "unsupported": _word_unsupported(comparison),
+             "selectable": comparison.selectable, "applied": False, "parts": []}
+    if tool == "lazygit":
+        state["parts"] = _build_word_picker(directory, comparison, _TEXTS["word"]["merge_commit"])
+    elif tool == "winmerge":
+        (directory / "winmerge").mkdir()
+        (directory / "baseline").mkdir()
+        left, right = "winmerge/取り込み先.word.txt", "winmerge/取り込み元.word.txt"
+        backup = "baseline/取り込み先.word.txt"
+        original = _word_winmerge_text(comparison)
+        (directory / left).write_bytes(original)
+        (directory / right).write_bytes(_word_winmerge_text(comparison, "changed"))
+        (directory / backup).write_bytes(original)
+        state["parts"] = [{"id": story.id, "title": story.title} for story in comparison.stories]
+        state["winmerge"] = {"left": left, "right": right, "baseline": backup,
+                             "baseline_sha256": hashlib.sha256(original).hexdigest()}
+    else:
+        raise StageError("選択画面の道具が不正です: " + tool)
+    write_json(directory / "session.json", state)
+    return state
+
+
 def prepare_merge_session(target, source, directory, tool="lazygit"):
     target, source, directory = resolve_user_path(target), resolve_user_path(source), Path(directory).resolve()
+    if _merge_kind(target, source) == "word":
+        return _prepare_word_merge_session(target, source, directory, tool=tool)
+    texts = _TEXTS["excel"]
     for path in (target, source):
         if path.suffix.lower() not in SUPPORTED:
-            raise StageError("取り込みの対象は .xlsx / .xlsm / .xltx / .xltm です: " + str(path))
+            raise StageError(texts["merge_suffix"] + str(path))
     check_target_writable(target)
     if not source.is_file():
         raise StageError("取り込み元は通常のファイルを指定してください: " + str(source))
@@ -484,7 +766,7 @@ def prepare_merge_session(target, source, directory, tool="lazygit"):
              "work_sha256": hashlib.sha256(work_data).hexdigest(),
              "differences": differences, "unsupported": unsupported, "applied": False, "sheets": []}
     if tool == "lazygit":
-        state["sheets"] = _build_picker(directory, base, baseline, changed, "取り込み先の Excel")
+        state["sheets"] = _build_picker(directory, base, baseline, changed, texts["merge_commit"])
     elif tool == "winmerge":
         (directory / "winmerge").mkdir()
         (directory / "baseline").mkdir()
@@ -512,8 +794,9 @@ def _assert_target_unchanged(path, expected_sha256):
 def replace_file(path, data, expected_sha256):
     """Replace in the same directory, checking the captured target before every attempt."""
     path = Path(path)
+    texts = _TEXTS[_kind(path)]
     attributes = check_target_writable(path)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".excel-merge-", suffix=path.suffix, dir=path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=texts["replace_prefix"], suffix=path.suffix, dir=path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as output:
@@ -537,7 +820,7 @@ def replace_file(path, data, expected_sha256):
                 return
             except PermissionError as error:
                 if attempt == 5:
-                    raise PermissionError("取り込み先を Excel などで開いているなら閉じてから再試行してください: " + str(path)) from error
+                    raise PermissionError(texts["open_retry"] + str(path)) from error
                 time.sleep(0.2)
     finally:
         temporary.unlink(missing_ok=True)
@@ -562,9 +845,26 @@ def _write_merge(directory, state, base, work, selected):
     return len(selected)
 
 
+def _write_word_merge(directory, state, comparison, selected):
+    if not selected:
+        return 0
+    with _word_errors():
+        rebuilt = comparison.rebuild(selected)
+    replace_file(Path(state["path"]), rebuilt, state["base_sha256"])
+    state["applied"], state["count"] = True, len(selected)
+    write_json(directory / "session.json", state)
+    _report_word_swaps(comparison)
+    return len(selected)
+
+
 def apply_merge_session(directory):
     directory = Path(directory).resolve()
     state = _merge_state(directory)
+    if state.get("format") == "word":
+        comparison = _session_word_comparison(directory, state)
+        selected = (winmerge_selected_word(directory, state, comparison) if state["tool"] == "winmerge" else
+                    selected_word(directory, state, comparison))
+        return _write_word_merge(directory, state, comparison, selected)
     base, work = _session_books(directory, state)
     selected = (winmerge_selected_cells(directory, state, base, work) if state["tool"] == "winmerge" else
                 selected_cells(directory, state, base, work))
@@ -626,6 +926,50 @@ def winmerge_selected_cells(directory, state, base, work):
                             location + " のセル置換が不完全です。", location + " の選択が不完全です。")
         if key is not None:
             selected.add(key)
+    return selected
+
+
+def winmerge_selected_word(directory, state, comparison):
+    details = state["winmerge"]
+    original = (directory / details["baseline"]).read_bytes()
+    if hashlib.sha256(original).hexdigest() != details["baseline_sha256"]:
+        raise StageError("選択開始時の射影が変更されています。画面を閉じて選び直してください。")
+    if original != _word_winmerge_text(comparison):
+        raise StageError("選択開始時の射影が Word 文書と一致しません。画面を閉じて選び直してください。")
+    try:
+        saved = _winmerge_lines((directory / details["left"]).read_bytes())
+    except UnicodeError as error:
+        raise StageError("WinMerge の保存文字コードは UTF-8 にしてください。") from error
+    before = _winmerge_lines(original)
+    after = _winmerge_lines(_word_winmerge_text(comparison, "changed"))
+    locations = [None, None]
+    for story in comparison.stories:
+        locations.append(None)
+        with _word_errors() as module:
+            locations.extend(story.title + " #" + module.parse_record(line).id.split("/", 1)[0]
+                             for line in story.baseline.splitlines())
+    if len(saved) != len(before):
+        mismatch = next((i for i, (old, new) in enumerate(zip(before, saved)) if old != new),
+                        min(len(before), len(saved)))
+        nearby = locations[mismatch:] + list(reversed(locations[:mismatch]))
+        location = next((value for value in nearby if value is not None), "本文 #1")
+        raise StageError("行の数が変わっています: " + location + "。行全体をコピーしてください。")
+    chosen = {story.id: [] for story in comparison.stories}
+    story_index = -1
+    for old, new, source, location in zip(before, saved, after, locations):
+        if old.startswith(b"#"):
+            if old != new:
+                raise StageError("WinMerge の見出しが変更されています。見出しの行を元に戻してください。")
+            if old.startswith("# 部分 ".encode("utf-8")):
+                story_index += 1
+            continue
+        if new != old and new != source:
+            raise StageError(location + " の選択が不正です。取り込み先か取り込み元の行全体をコピーしてください。")
+        chosen[comparison.stories[story_index].id].append(new.decode("utf-8"))
+    selected = set()
+    with _word_errors():
+        for story in comparison.stories:
+            selected.update(comparison.choose(story.id, chosen[story.id], projection="changed"))
     return selected
 
 
@@ -691,7 +1035,10 @@ def _winmerge_select(directory, state):
             # Read the snapshots once, after the window closes, so a large
             # workbook does not stay in memory while WinMerge is open.
             if books is None:
-                books = _session_books(directory, state)
+                books = (_session_word_comparison(directory, state) if state.get("format") == "word" else
+                         _session_books(directory, state))
+            if state.get("format") == "word":
+                return winmerge_selected_word(directory, state, books), books
             return winmerge_selected_cells(directory, state, *books), books
         except (StageError, WorkbookError, UnicodeError) as error:
             if not sys.stdin.isatty():
@@ -709,10 +1056,12 @@ def run_winmerge(directory):
 def _merge_with_winmerge(directory):
     directory = Path(directory).resolve()
     state = _merge_state(directory)
-    selected, (base, work) = _winmerge_select(directory, state)
+    selected, books = _winmerge_select(directory, state)
     while True:
         try:
-            return _write_merge(directory, state, base, work, selected)
+            if state.get("format") == "word":
+                return _write_word_merge(directory, state, books, selected)
+            return _write_merge(directory, state, *books, selected)
         except PermissionError as error:
             if not sys.stdin.isatty():
                 raise
@@ -722,22 +1071,36 @@ def _merge_with_winmerge(directory):
 
 
 def _apply_merge_cli(directory):
+    texts = _TEXTS[_session_kind(directory)]
     try:
         count = apply_merge_session(directory)
-        print(str(count) + " セルを取り込み先へ書き込みました。q で元の画面へ戻ってください。" if count else
-              "セル変更が選択されていません。Enter・Space でハンクを選び、X で反映してください。")
+        print(texts["merged_picker"].format(count) if count else
+              texts["nothing_selected"])
         return 0
     except (StageError, WorkbookError, OSError, UnicodeError, ValueError, KeyboardInterrupt) as error:
-        print("Excel の取り込みに失敗しました: " + str(error), file=sys.stderr)
+        print(texts["merge_failed"] + str(error), file=sys.stderr)
         return 1
 
 
+def _unsupported_summary(kind, items):
+    if kind == "word":
+        examples = ", ".join(item["story_title"] + (" #" + item["slot"] if item["slot"] else "") +
+                             "（" + item["reason"] + "）" for item in items[:20])
+    else:
+        examples = ", ".join(item["sheet"] + "!" + item["coordinate"] + "（" + item["reason"] + "）" for item in items[:20])
+    if len(items) > 20:
+        examples += _TEXTS[kind]["more"].format(len(items) - 20)
+    return examples
+
+
 def merge_main(argv=None):
-    parser = argparse.ArgumentParser(description="2 つの Excel のセル変更を取り込む")
+    parser = argparse.ArgumentParser(description="2 つの Excel ブックのセル、または 2 つの Word 文書の変更を取り込む")
     parser.add_argument("--tool", choices=("auto", "winmerge", "lazygit"), default="auto")
     parser.add_argument("target")
     parser.add_argument("source")
     args = parser.parse_args(argv)
+    kind = _kind(args.target)
+    texts = _TEXTS[kind]
     directory = None
     try:
         target, source = resolve_user_path(args.target), resolve_user_path(args.source)
@@ -746,33 +1109,31 @@ def merge_main(argv=None):
             check_tools()
         print("書き換えるファイル: " + str(target), flush=True)
         print("取り込み元: " + str(source), flush=True)
-        print("Excel を読み込んでいます。大きいブックでは画面が開くまで時間がかかります。", flush=True)
-        directory = Path(tempfile.mkdtemp(prefix="excel-merge-"))
+        print(texts["reading_merge"], flush=True)
+        directory = Path(tempfile.mkdtemp(prefix=texts["merge_prefix"]))
         state = prepare_merge_session(target, source, directory, tool=tool)
         unsupported = state["unsupported"]
         if unsupported:
-            examples = ", ".join(item["sheet"] + "!" + item["coordinate"] + "（" + item["reason"] + "）" for item in unsupported[:20])
-            if len(unsupported) > 20:
-                examples += "、ほか " + str(len(unsupported) - 20) + " セル"
-            print("取り込めない違い（" + str(len(unsupported)) + " セル）: " + examples, flush=True)
-        if state["differences"] == len(unsupported):
-            print("取り込める差分がありません（取り込めない違い " + str(len(unsupported)) + " セル）。取り込み先は変えていません。" if unsupported else
-                  "差分がありません。取り込み先は変えていません。")
+            print(texts["unsupported_merge"].format(len(unsupported)) + _unsupported_summary(kind, unsupported), flush=True)
+        no_selection = state["selectable"] == 0 if kind == "word" else state["differences"] == len(unsupported)
+        if no_selection:
+            print(texts["only_unsupported"].format(len(unsupported)) if unsupported else
+                  texts["no_difference"])
             return 0
         if tool == "winmerge":
-            print("WinMerge で、取り込むセルの行を右から左へコピーし、上書き保存（Ctrl+S）してから WinMerge の窓を閉じてください。", flush=True)
+            print(texts["winmerge_hint"], flush=True)
             count = _merge_with_winmerge(directory)
             result = 0
         else:
-            print("専用画面で、取り込むハンクを Enter → Space で選び、X で書き込んでください。q で閉じると取り消します。", flush=True)
+            print(texts["picker_hint"], flush=True)
             result = run_picker(directory, merge=True)
             state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
             count = state.get("count", 0) if state["applied"] else 0
-        print(str(count) + " セルを取り込み先へ書き込みました: " + str(target) if count else
-              "取り込むセルが選ばれていません。取り込み先は変えていません。")
+        print(texts["merged"].format(count) + str(target) if count else
+              texts["merge_nothing"])
         return result
     except (StageError, WorkbookError, OSError, UnicodeError, ValueError, KeyboardInterrupt) as error:
-        print("Excel の取り込みに失敗しました: " + str(error), file=sys.stderr)
+        print(texts["merge_failed"] + str(error), file=sys.stderr)
         return 1
     finally:
         if directory is not None:
@@ -787,35 +1148,42 @@ def main(argv=None):
     if arguments[:1] == ["--merge"]:
         return merge_main(arguments[1:])
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("file", nargs="?", help="既存の Excel ファイル")
+    parser.add_argument("file", nargs="?", help="既存の Excel または Word のファイル")
     parser.add_argument("--apply-session", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--apply-merge-session", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(arguments)
+    texts = _TEXTS[_session_kind(args.apply_session) if args.apply_session is not None else _kind(args.file or "")]
     if args.apply_merge_session is not None:
         return _apply_merge_cli(args.apply_merge_session)
     try:
         if args.apply_session is not None:
             count = apply_session(args.apply_session)
-            print(str(count) + " セルを Excel のままステージしました。q で元の画面へ戻ってください。" if count else
-                  "セル変更が選択されていません。Enter・Space でハンクを選び、X で反映してください。")
+            print(texts["staged"].format(count) if count else
+                  texts["nothing_selected"])
             return 0
         if not args.file:
-            parser.error("Excel ファイルを指定してください")
+            parser.error("Excel か Word のファイルを指定してください")
         check_tools()
         repo = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").stdout.decode().strip())
         prefix = os.environ.get("GIT_PREFIX", "")
         path = str(Path(prefix) / args.file) if prefix else args.file
-        directory = Path(tempfile.mkdtemp(prefix="lazygit-excel-stage-"))
+        directory = Path(tempfile.mkdtemp(prefix=texts["stage_prefix"]))
         try:
             prepare_session(repo, path, directory, progress=lambda message: print(message, flush=True))
+            if _kind(path) == "word":
+                state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+                unsupported = state["unsupported"]
+                if unsupported:
+                    print(texts["unsupported_stage"].format(len(unsupported)) +
+                          _unsupported_summary("word", unsupported), flush=True)
             result = run_picker(directory)
             state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
-            print("Excel の部分ステージを反映しました。" if state["applied"] else "選択を取り消しました。Excel のインデックスは変更していません。")
+            print(texts["stage_done"] if state["applied"] else texts["stage_cancelled"])
             return result
         finally:
             cleanup_session(directory)
     except (StageError, WorkbookError, OSError, UnicodeError, ValueError, KeyboardInterrupt) as error:
-        print("Excel の部分ステージに失敗しました: " + str(error), file=sys.stderr)
+        print(texts["stage_failed"] + str(error), file=sys.stderr)
         return 1
 
 

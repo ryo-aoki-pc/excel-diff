@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render Excel cells as stable UTF-8 text for Git's textconv diff driver."""
+"""Render Excel cells and Word documents as stable UTF-8 text for Git's textconv diff driver."""
 
 import argparse
 import datetime as dt
@@ -13,6 +13,14 @@ from pathlib import Path
 
 # Modules needed only to convert or to start the worker are imported where they
 # are used: a cache hit runs twice for every Excel diff lazygit shows.
+
+WORD_SUFFIXES = {".docx", ".docm", ".dotx", ".dotm"}
+WORD_MAIN_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
+    "application/vnd.ms-word.document.macroEnabled.main+xml",
+    "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+}
 
 OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 # With --cache-dir, a conversion that takes longer than this many seconds is
@@ -125,9 +133,54 @@ def render_xls(data, out):
         book.release_resources()
 
 
+def package_kind(data):
+    """Return "word" for Word content, otherwise "excel"; never raise."""
+    import posixpath
+    from urllib.parse import unquote
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            root = ET.fromstring(archive.read("_rels/.rels"))
+            office = [
+                node for node in root
+                if node.get("Type", "").endswith("/officeDocument")
+                and node.get("TargetMode", "").lower() != "external"
+            ]
+            if len(office) != 1:
+                return "excel"
+            target = unquote(office[0].get("Target", "").split("#", 1)[0])
+            target = posixpath.normpath("/" + target.lstrip("/"))
+            types = ET.fromstring(archive.read("[Content_Types].xml"))
+            for node in types:
+                if (node.tag.endswith("}Override")
+                        and node.get("PartName", "").casefold() == target.casefold()
+                        and node.get("ContentType") in WORD_MAIN_TYPES):
+                    return "word"
+    except Exception:
+        pass
+    return "excel"
+
+
+def word_module():
+    """Import the installed sibling build first, then the repository module."""
+    script = Path(__file__).resolve()
+    for directory in (script.with_suffix(""), script.parent):
+        if (directory / "word_ooxml.py").is_file():
+            if str(directory) not in sys.path:
+                sys.path.insert(0, str(directory))
+            import word_ooxml
+
+            return word_ooxml
+    raise ValueError("Word の変換モジュール word_ooxml.py がありません。セットアップを再実行してください。")
+
+
 def convert(data):
     out = io.StringIO()
     if data.startswith(b"PK"):
+        if package_kind(data) == "word":
+            return word_module().render_text(data)
         render_ooxml(io.BytesIO(data), out)
     elif data[:8] == OLE_SIGNATURE:
         render_xls(data, out)
@@ -204,7 +257,7 @@ def timeout_seconds():
 
 
 def input_size(data):
-    """Bytes the converter has to parse: the unpacked sheets of an .xlsx."""
+    """Bytes to parse: unpacked worksheet and Word XML parts."""
     if data.startswith(b"PK"):
         import zipfile
 
@@ -214,6 +267,7 @@ def input_size(data):
                     info.file_size for info in archive.infolist()
                     if info.filename.startswith("xl/worksheets/")
                     or info.filename == "xl/sharedStrings.xml"
+                    or (info.filename.startswith("word/") and info.filename.endswith(".xml"))
                 )
         except zipfile.BadZipFile:
             return 0  # convert() reports the broken file.
@@ -244,6 +298,16 @@ def sheet_titles(data):
 
 
 def placeholder(key, data):
+    if package_kind(data) == "word":
+        lines = [
+            "# Word を裏で変換中 (" + key[:12] + ")",
+            "# 完了後に選び直すか R で表示",
+        ]
+        try:
+            lines += word_module().placeholder_lines(data)
+        except Exception:
+            pass
+        return "\n".join(lines) + "\n"
     # The hash differs between the two sides of a diff, so Git still reports
     # the file as changed while the cells are being converted.
     # Short lines, so they fit one half of delta's side-by-side view.
@@ -423,7 +487,7 @@ def run_worker(cache_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("file", type=Path, nargs="?", help="Excel file or Git temporary blob")
+    parser.add_argument("file", type=Path, nargs="?", help="Excel/Word file or Git temporary blob")
     parser.add_argument("--cache-dir", type=Path,
                         help="変換結果のキャッシュ。指定すると時間のかかる変換を裏で続ける")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -431,10 +495,11 @@ def main():
     if args.worker:
         return run_worker(args.cache_dir) if args.cache_dir else 2
     if args.file is None:
-        parser.error("Excel ファイルを指定してください")
+        parser.error("Excel か Word のファイルを指定してください")
     # Git consumes UTF-8 even on Windows with a non-UTF-8 console code page.
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     sys.stderr.reconfigure(encoding="utf-8")
+    data = None
     try:
         data = args.file.read_bytes()
         if args.cache_dir is None:
@@ -442,7 +507,15 @@ def main():
         else:
             text, finished = cached_convert(data, args.cache_dir)
     except (Exception, KeyboardInterrupt) as error:
-        print("Excel の差分変換に失敗しました: " + str(error), file=sys.stderr)
+        label = "Word" if (args.file.suffix.lower() in WORD_SUFFIXES
+                           or (data is not None and package_kind(data) == "word")) else "Excel"
+        text = str(error)
+        if label == "Word" and data is not None:
+            if data[:8] == OLE_SIGNATURE:
+                text = "暗号化された Word 文書と .doc 形式は表示できません"
+            elif not data.startswith(b"PK"):
+                text = "対応する Word ファイルではありません (docx/docm/dotx/dotm)"
+        print(label + " の差分変換に失敗しました: " + text, file=sys.stderr)
         return 1
     sys.stdout.write(text)
     sys.stdout.flush()
