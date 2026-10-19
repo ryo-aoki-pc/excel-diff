@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Excel の差分表示と部分ステージをユーザー全体に設定する (Python 3.9 以降)。"""
+"""Excel・Word の差分表示と部分ステージをユーザー全体に設定する (Python 3.9 以降)。"""
 
 import argparse
 import hashlib
@@ -23,8 +23,15 @@ ATTRIBUTE_BLOCK = (
     "*.[xX][lL][tT][mM] diff=excel\n"
     "*.[xX][lL][sS] diff=excel\n"
     "*.[xX][lL][tT] diff=excel\n"
+    "*.[dD][oO][cC][xX] diff=word\n"
+    "*.[dD][oO][cC][mM] diff=word\n"
+    "*.[dD][oO][tT][xX] diff=word\n"
+    "*.[dD][oO][tT][mM] diff=word\n"
     "# END lazygit Excel textconv (setup-excel-diff.py)\n"
 ).encode("ascii")
+
+CONVERTER_MODULES = ("word_ooxml.py",)
+STAGE_MODULES = ("excel_stage_ooxml.py", "word_ooxml.py", "word_stage_ooxml.py")
 
 
 def xdg_directory(variable, fallback):
@@ -93,18 +100,24 @@ def dependency_versions(python):
     return result.stdout.strip()
 
 
-def converter_path(install_directory, source, requirements, versions):
+def converter_path(install_directory, source, requirements, versions, modules=()):
     # Git invalidates its textconv cache when the command changes. Include the
     # converter and library versions so reinstalls cannot reuse stale text.
-    digest = hashlib.sha256(source + b"\0" + requirements + b"\0" + versions.encode("utf-8"))
+    digest = hashlib.sha256(
+        b"\0".join((source, *modules, requirements, versions.encode("utf-8")))
+    )
     return install_directory / ("excel-textconv-" + digest.hexdigest()[:16] + ".py")
 
 
-def stage_path(install_directory, source, module, requirements, versions):
-    # Keep the entry point and its imported module in one immutable build so a
+def converter_library(converter):
+    return converter.with_suffix("")
+
+
+def stage_path(install_directory, source, modules, requirements, versions):
+    # Keep the entry point and its imported modules in one immutable build so a
     # running selector cannot accidentally import a different installed version.
     digest = hashlib.sha256(
-        b"\0".join((source, module, requirements, versions.encode("utf-8")))
+        b"\0".join((source, *modules, requirements, versions.encode("utf-8")))
     )
     return install_directory / ("excel-stage-" + digest.hexdigest()[:16]) / "excel-stage.py"
 
@@ -139,11 +152,43 @@ def merge_alias(python, helper):
 
 
 def registered_converter(command):
-    for part in shlex.split(command):
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    for part in parts:
         name = Path(part).name
         if name.startswith("excel-textconv-") and name.endswith(".py"):
             return Path(part)
     return None
+
+
+def registered_helper(command):
+    if not command.startswith("!"):
+        return None
+    try:
+        parts = shlex.split(command[1:])
+    except ValueError:
+        return None
+    for part in parts:
+        path = Path(part)
+        if path.name == "excel-stage.py" and path.parent.name.startswith("excel-stage-"):
+            return path
+    return None
+
+
+def owns_word_setting(key, values):
+    identify = registered_converter if key == "diff.word.textconv" else registered_helper
+    return bool(values) and all(identify(value) is not None for value in values)
+
+
+def check_word_ownership():
+    for key in ("diff.word.textconv", "alias.word-stage", "alias.word-merge"):
+        values = git_values(key)
+        if values and not owns_word_setting(key, values):
+            raise RuntimeError(
+                key + " に別の設定があります。外してから再実行してください。設定は変更していません。"
+            )
 
 
 def remove_stale_caches(converter):
@@ -156,21 +201,26 @@ def remove_stale_caches(converter):
             shutil.rmtree(directory, ignore_errors=True)
 
 
-def verify(converter, source, attributes, expected, helper, helper_source, module_source):
-    if not converter.is_file() or converter.read_bytes() != source:
+def verify(converter, source, attributes, expected, helper, helper_source,
+           converter_modules, stage_modules):
+    if (not converter.is_file() or converter.read_bytes() != source
+            or any(not (converter_library(converter) / name).is_file()
+                   or (converter_library(converter) / name).read_bytes() != module
+                   for name, module in zip(CONVERTER_MODULES, converter_modules))):
         raise RuntimeError("変換スクリプトが未設定か更新されています。セットアップを再実行してください。")
-    module = helper.with_name("excel_stage_ooxml.py")
     if (not helper.is_file() or helper.read_bytes() != helper_source
-            or not module.is_file() or module.read_bytes() != module_source):
-        raise RuntimeError("Excel 部分ステージのスクリプトが未設定か更新されています。セットアップを再実行してください。")
+            or any(not (helper.parent / name).is_file()
+                   or (helper.parent / name).read_bytes() != module
+                   for name, module in zip(STAGE_MODULES, stage_modules))):
+        raise RuntimeError("Excel・Word 部分ステージのスクリプトが未設定か更新されています。セットアップを再実行してください。")
     for key, value in expected.items():
         values = git_values(key)
         if not values or values[-1] != value:
             raise RuntimeError(key + " が設定と一致しません。セットアップを再実行してください。")
-    if not attributes.is_file() or not attributes.read_bytes().rstrip(b"\r\n").endswith(
-        ATTRIBUTE_BLOCK.rstrip(b"\n")
-    ):
-        raise RuntimeError("Excel 用の attributes が未設定か変更されています。セットアップを再実行してください。")
+    content = attributes.read_bytes() if attributes.is_file() else b""
+    without_attribute_block(content)
+    if not content.rstrip(b"\r\n").endswith(ATTRIBUTE_BLOCK.rstrip(b"\n")):
+        raise RuntimeError("Excel・Word 用の attributes が未設定か変更されています。セットアップを再実行してください。")
 
 
 UNINSTALL_KEYS = (
@@ -179,6 +229,11 @@ UNINSTALL_KEYS = (
     "diff.excel.cachetextconv",
     "alias.excel-stage",
     "alias.excel-merge",
+    "diff.word.textconv",
+    "diff.word.binary",
+    "diff.word.cachetextconv",
+    "alias.word-stage",
+    "alias.word-merge",
 )
 
 
@@ -205,9 +260,19 @@ def without_attribute_block(content):
         return content
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
         raise RuntimeError(
-            "attributes の Excel 用区画の目印が壊れています。設定は変更していません。"
+            "attributes の Excel・Word 用区画の目印が壊れています。設定は変更していません。"
         )
     return content[:starts[0]] + content[ends[0]:]
+
+
+def with_attribute_block(content):
+    remaining = without_attribute_block(content)
+    if content.rstrip(b"\r\n").endswith(ATTRIBUTE_BLOCK.rstrip(b"\n")):
+        return content
+    # A BOM alone is not a user rule and needs no separating newline.
+    rules = remaining[3:] if remaining.startswith(b"\xef\xbb\xbf") else remaining
+    separator = b"\n" if rules and not rules.endswith(b"\n") else b""
+    return remaining + separator + ATTRIBUTE_BLOCK
 
 
 def linked_directory(path):
@@ -262,6 +327,16 @@ def validate_uninstall_directory(directory, root):
                 and entry.is_file()):
             converter_found = True
             continue
+        if (entry.name.startswith("excel-textconv-") and entry.is_dir()
+                and (entry / "word_ooxml.py").is_file()):
+            for module in entry.iterdir():
+                if linked_directory(module):
+                    raise RuntimeError("導入先にリンクがあるため削除しません: " + str(module))
+                if ((module.name == "word_ooxml.py" and module.is_file())
+                        or (module.name == "__pycache__" and module.is_dir())):
+                    continue
+                raise RuntimeError("導入スクリプトが作った形ではないため削除しません: " + str(entry))
+            continue
         if (entry.name.startswith("excel-stage-") and entry.is_dir()
                 and (entry / "excel-stage.py").is_file()):
             helper_found = True
@@ -282,6 +357,14 @@ def uninstall(directory, root):
     remaining = without_attribute_block(existing)
     remove_directory = validate_uninstall_directory(directory, root)
     configured = {key: git_values(key) for key in UNINSTALL_KEYS}
+    word_converter_owned = owns_word_setting("diff.word.textconv", configured["diff.word.textconv"])
+    # Keep an entire key when any value is foreign. Binary/cache settings belong
+    # to the Word converter; aliases are owned independently of that converter.
+    configured = {
+        key: values for key, values in configured.items()
+        if (word_converter_owned if key.startswith("diff.word.") else
+            owns_word_setting(key, values) if key.startswith("alias.word-") else True)
+    }
     for key, values in configured.items():
         if values != git_values(key, includes=False):
             raise RuntimeError(
@@ -303,7 +386,7 @@ def uninstall(directory, root):
             removed = True
     if remaining != existing:
         attributes.write_bytes(remaining)
-        print("削除した attributes の Excel 用区画: " + str(attributes))
+        print("削除した attributes の Excel・Word 用区画: " + str(attributes))
         removed = True
     if remove_directory:
         shutil.rmtree(directory)
@@ -322,19 +405,21 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", type=Path,
-                        help="仮想環境と Excel 用スクリプトの保存先 (既定: ユーザーのデータ領域の excel-diff。リポジトリの外)")
+                        help="仮想環境と Excel・Word 用スクリプトの保存先 (既定: ユーザーのデータ領域の excel-diff。リポジトリの外)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="設定を変更せず、インストール状態を確認する")
-    mode.add_argument("--uninstall", action="store_true", help="Excel 用の Git 設定・attributes の区画・導入先を削除する")
+    mode.add_argument("--uninstall", action="store_true", help="Excel・Word 用の Git 設定・attributes の区画・導入先を削除する")
     args = parser.parse_args()
     try:
         root = Path(__file__).resolve().parent.parent
         selected_directory = args.install_dir
         if (args.check or args.uninstall) and selected_directory is None:
-            commands = git_values("diff.excel.textconv")
-            registered = registered_converter(commands[-1]) if commands else None
-            if registered is not None:
-                selected_directory = registered.parent
+            for key in ("diff.excel.textconv", "diff.word.textconv"):
+                commands = git_values(key)
+                registered = registered_converter(commands[-1]) if commands else None
+                if registered is not None:
+                    selected_directory = registered.parent
+                    break
         requested_directory = (selected_directory or default_install_directory()).expanduser()
         if args.uninstall and linked_directory(requested_directory):
             raise RuntimeError("導入先のリンクは削除しません: " + str(requested_directory))
@@ -346,26 +431,30 @@ def main():
         source_path = root / "scripts/excel-textconv.py"
         source = source_path.read_bytes()
         helper_source = (root / "scripts/excel-stage.py").read_bytes()
-        module_source = (root / "scripts/excel_stage_ooxml.py").read_bytes()
+        converter_modules = tuple((root / "scripts" / name).read_bytes() for name in CONVERTER_MODULES)
+        stage_modules = tuple((root / "scripts" / name).read_bytes() for name in STAGE_MODULES)
         requirements_path = root / "requirements-excel-diff.txt"
         requirements = requirements_path.read_bytes()
         attributes = attributes_file()
         # Read before installing, so unreadable attributes do not cause a partial setup.
         existing_attributes = attributes.read_bytes() if attributes.exists() else b""
+        updated_attributes = with_attribute_block(existing_attributes)
+        if not args.check:
+            check_word_ownership()
         python = directory / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if args.check:
             if not python.is_file():
-                raise RuntimeError("Excel 用の仮想環境がありません。セットアップを実行してください。")
+                raise RuntimeError("Excel・Word 用の仮想環境がありません。セットアップを実行してください。")
         else:
-            print("Excel 用の仮想環境と依存関係を準備しています。", flush=True)
+            print("Excel・Word 用の仮想環境と依存関係を準備しています。", flush=True)
             venv.EnvBuilder(with_pip=True).create(directory / "venv")
             subprocess.run(
                 [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements_path)],
                 check=True,
             )
         versions = dependency_versions(python)
-        converter = converter_path(directory, source, requirements, versions)
-        helper = stage_path(directory, helper_source, module_source, requirements, versions)
+        converter = converter_path(directory, source, requirements, versions, converter_modules)
+        helper = stage_path(directory, helper_source, stage_modules, requirements, versions)
         expected = {
             "diff.excel.textconv": textconv_command(python, converter),
             "alias.excel-stage": stage_alias(python, helper),
@@ -374,36 +463,48 @@ def main():
             # The converter keeps its own cache. Git's cache would store the
             # temporary "converting" text of a large workbook for good.
             "diff.excel.cachetextconv": "false",
+            "diff.word.textconv": textconv_command(python, converter),
+            "diff.word.binary": "true",
+            "diff.word.cachetextconv": "false",
+            "alias.word-stage": stage_alias(python, helper),
+            "alias.word-merge": merge_alias(python, helper),
         }
         if not git_values("core.attributesFile", path=True):
             # Pin the selected path so the rules also apply when another shell
             # or editor starts Git with a different XDG_CONFIG_HOME.
             expected["core.attributesFile"] = attributes.as_posix()
         if not args.check:
+            library = converter_library(converter)
+            library.mkdir(parents=True, exist_ok=True)
+            for name, module in zip(CONVERTER_MODULES, converter_modules):
+                (library / name).write_bytes(module)
             converter.write_bytes(source)
             helper.parent.mkdir(parents=True, exist_ok=True)
+            for name, module in zip(STAGE_MODULES, stage_modules):
+                (helper.parent / name).write_bytes(module)
             helper.write_bytes(helper_source)
-            helper.with_name("excel_stage_ooxml.py").write_bytes(module_source)
             remove_stale_caches(converter)
-            if not existing_attributes.rstrip(b"\r\n").endswith(ATTRIBUTE_BLOCK.rstrip(b"\n")):
+            if updated_attributes != existing_attributes:
                 attributes.parent.mkdir(parents=True, exist_ok=True)
-                # Append bytes to preserve unrelated rules, encodings and line endings.
-                with attributes.open("ab") as output:
-                    if existing_attributes and not existing_attributes.endswith(b"\n"):
-                        output.write(b"\n")
-                    output.write(ATTRIBUTE_BLOCK)
+                if updated_attributes.startswith(existing_attributes):
+                    # Append only the tail when all original bytes stay in place.
+                    with attributes.open("ab") as output:
+                        output.write(updated_attributes[len(existing_attributes):])
+                else:
+                    attributes.write_bytes(updated_attributes)
             for key, value in expected.items():
                 subprocess.run(["git", "config", "--global", "--replace-all", key, value], check=True)
-        verify(converter, source, attributes, expected, helper, helper_source, module_source)
-        print("Excel 差分と部分ステージの設定を確認しました。" if args.check
-              else "Excel 差分と部分ステージをグローバルに設定しました。")
+        verify(converter, source, attributes, expected, helper, helper_source,
+               converter_modules, stage_modules)
+        print("Excel・Word の差分と部分ステージの設定を確認しました。" if args.check
+              else "Excel・Word の差分と部分ステージをグローバルに設定しました。")
         print("変換スクリプト: " + str(converter))
-        print("部分ステージ: " + str(helper))
-        print("取り込み: git excel-merge")
+        print("部分ステージ: " + str(helper) + " (git excel-stage / git word-stage)")
+        print("取り込み: git excel-merge / git word-merge")
         print("attributes: " + str(attributes))
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as error:
-        print("Excel 差分のセットアップに失敗しました: " + str(error), file=sys.stderr)
+        print("Excel・Word 差分のセットアップに失敗しました: " + str(error), file=sys.stderr)
         return 1
 
 
