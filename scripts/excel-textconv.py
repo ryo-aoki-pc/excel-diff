@@ -30,6 +30,9 @@ TIMEOUT_VARIABLE = "EXCEL_TEXTCONV_TIMEOUT"
 # Twice the fastest rate measured (about 4 MB/s of sheet XML on a Ryzen AI
 # MAX+ 395), so only workbooks that cannot finish in time skip the wait.
 OPTIMISTIC_BYTES_PER_SECOND = 8 * 1024 * 1024
+# The same rule for BIFF12: about twice the rate measured for unpacked sheet and
+# string records (about 4.3 MB/s for 500,000 cells on the same machine).
+XLSB_OPTIMISTIC_BYTES_PER_SECOND = 8 * 1024 * 1024
 CACHE_LIMIT_BYTES = 512 * 1024 * 1024
 CACHE_MAX_AGE = 30 * 24 * 3600
 PRUNE_INTERVAL = 3600
@@ -104,88 +107,114 @@ def render_ooxml(source, out):
 
 
 def render_xls(data, out):
-    import xlrd
-
-    # xlrd exposes cached formula results, not the formula expressions in .xls.
-    book = xlrd.open_workbook(file_contents=data, on_demand=True)
     try:
-        for sheet in book.sheets():
-            out.write("Sheet: " + quoted(sheet.name) + "\n")
-            for row_index in range(sheet.nrows):
-                for col_index, cell in enumerate(sheet.row(row_index)):
-                    if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
-                        continue
-                    value = cell.value
-                    if cell.ctype == xlrd.XL_CELL_DATE:
-                        value = xlrd.xldate_as_datetime(value, book.datemode)
-                        if 0 <= cell.value < 1:
-                            value = value.time()
-                        text = value_text(value)
-                    elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
-                        text = quoted(bool(value))
-                    elif cell.ctype == xlrd.XL_CELL_ERROR:
-                        text = "error: " + quoted(xlrd.error_text_from_code[value])
-                    else:
-                        text = value_text(value)
-                    coordinate = column_letter(col_index + 1) + str(row_index + 1)
-                    out.write(coordinate + "\t" + text + "\n")
-    finally:
-        book.release_resources()
+        out.write(sibling_module("excel_xls").render_text(data))
+    except Exception as error:
+        raise ValueError("xls/xlsb を読めません。パスワード付き（暗号化）の xlsb は表示できません: "
+                         + str(error)) from error
 
 
-def package_kind(data):
-    """Return "word" for Word content, otherwise "excel"; never raise."""
+def package_main(data):
+    """Resolve the officeDocument part and its declared content type."""
     import posixpath
     from urllib.parse import unquote
     import xml.etree.ElementTree as ET
     import zipfile
 
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        root = ET.fromstring(archive.read("_rels/.rels"))
+        office = [
+            node for node in root
+            if node.get("Type", "").endswith("/officeDocument")
+            and node.get("TargetMode", "").lower() != "external"
+        ]
+        if len(office) != 1:
+            return None, None
+        target = unquote(office[0].get("Target", "").split("#", 1)[0])
+        target = posixpath.normpath("/" + target.lstrip("/"))
+        types = ET.fromstring(archive.read("[Content_Types].xml"))
+        for node in types:
+            if (node.tag.endswith("}Override")
+                    and node.get("PartName", "").casefold() == target.casefold()):
+                return target.lstrip("/"), node.get("ContentType")
+        extension = target.rsplit(".", 1)[-1].lower()
+        for node in types:
+            if (node.tag.endswith("}Default")
+                    and node.get("Extension", "").lower() == extension):
+                return target.lstrip("/"), node.get("ContentType")
+    return target.lstrip("/"), None
+
+
+def package_kind(data):
+    """Identify supported ZIP content independently of the filename; never raise."""
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            root = ET.fromstring(archive.read("_rels/.rels"))
-            office = [
-                node for node in root
-                if node.get("Type", "").endswith("/officeDocument")
-                and node.get("TargetMode", "").lower() != "external"
-            ]
-            if len(office) != 1:
-                return "excel"
-            target = unquote(office[0].get("Target", "").split("#", 1)[0])
-            target = posixpath.normpath("/" + target.lstrip("/"))
-            types = ET.fromstring(archive.read("[Content_Types].xml"))
-            for node in types:
-                if (node.tag.endswith("}Override")
-                        and node.get("PartName", "").casefold() == target.casefold()
-                        and node.get("ContentType") in WORD_MAIN_TYPES):
-                    return "word"
+        _, content_type = package_main(data)
+        if content_type in WORD_MAIN_TYPES:
+            return "word"
+        if content_type == "application/vnd.ms-excel.sheet.binary.macroEnabled.main":
+            return "xlsb"
+        if content_type == "application/vnd.ms-excel.addin.macroEnabled.main+xml":
+            return "xlam"
     except Exception:
         pass
     return "excel"
 
 
-def word_module():
+def sibling_module(name):
     """Import the installed sibling build first, then the repository module."""
+    import importlib
+
     script = Path(__file__).resolve()
     for directory in (script.with_suffix(""), script.parent):
-        if (directory / "word_ooxml.py").is_file():
+        if (directory / (name + ".py")).is_file():
             if str(directory) not in sys.path:
                 sys.path.insert(0, str(directory))
-            import word_ooxml
+            return importlib.import_module(name)
+    raise ValueError("変換モジュール " + name + ".py がありません。セットアップを再実行してください。")
 
-            return word_ooxml
-    raise ValueError("Word の変換モジュール word_ooxml.py がありません。セットアップを再実行してください。")
+
+def word_module():
+    return sibling_module("word_ooxml")
+
+
+def xlam_source(data):
+    """Make openpyxl recognize an add-in without changing the original package."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    main, _ = package_main(data)
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as original, zipfile.ZipFile(output, "w") as result:
+        types = ET.fromstring(original.read("[Content_Types].xml"))
+        for node in types:
+            if (node.tag.endswith("}Override")
+                    and node.get("PartName", "").lstrip("/").casefold() == main.casefold()):
+                node.set("ContentType", "application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+                break
+        else:
+            namespace = types.tag.rsplit("}", 1)[0] + "}" if types.tag.startswith("{") else ""
+            ET.SubElement(types, namespace + "Override", PartName="/" + main,
+                          ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+        for info in original.infolist():
+            result.writestr(info, ET.tostring(types, encoding="utf-8")
+                            if info.filename == "[Content_Types].xml" else original.read(info))
+    output.seek(0)
+    return output
 
 
 def convert(data):
     out = io.StringIO()
     if data.startswith(b"PK"):
-        if package_kind(data) == "word":
+        kind = package_kind(data)
+        if kind == "word":
             return word_module().render_text(data)
-        render_ooxml(io.BytesIO(data), out)
+        if kind == "xlsb":
+            return sibling_module("excel_xlsb").render_text(data)
+        render_ooxml(xlam_source(data) if kind == "xlam" else io.BytesIO(data), out)
     elif data[:8] == OLE_SIGNATURE:
         render_xls(data, out)
     else:
-        raise ValueError("対応する Excel ファイルではありません (xlsx/xlsm/xltx/xltm/xls/xlt)")
+        raise ValueError("対応する Excel ファイルではありません (xlsx/xlsm/xltx/xltm/xlam/xlsb/xls/xlt)")
     return out.getvalue()
 
 
@@ -257,12 +286,17 @@ def timeout_seconds():
 
 
 def input_size(data):
-    """Bytes to parse: unpacked worksheet and Word XML parts."""
+    """Bytes to parse: unpacked worksheet/string parts and Word XML parts."""
     if data.startswith(b"PK"):
         import zipfile
 
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                if package_kind(data) == "xlsb":
+                    return sum(info.file_size for info in archive.infolist()
+                               if (info.filename.startswith("xl/worksheets/")
+                                   and info.filename.endswith(".bin"))
+                               or info.filename == "xl/sharedStrings.bin")
                 return sum(
                     info.file_size for info in archive.infolist()
                     if info.filename.startswith("xl/worksheets/")
@@ -278,6 +312,8 @@ def sheet_titles(data):
     """Read only the sheet names, which is fast even for a large workbook."""
     try:
         if data.startswith(b"PK"):
+            if package_kind(data) == "xlsb":
+                return sibling_module("excel_xlsb").sheet_titles(data)
             import xml.etree.ElementTree as ET
             import zipfile
 
@@ -398,7 +434,9 @@ def cached_convert(data, cache_dir):
         # Already queued: answer at once instead of converting it twice.
         os.utime(pending)
         return placeholder(key, data), False
-    if timeout > 0 and input_size(data) > timeout * OPTIMISTIC_BYTES_PER_SECOND:
+    rate = (XLSB_OPTIMISTIC_BYTES_PER_SECOND if package_kind(data) == "xlsb"
+            else OPTIMISTIC_BYTES_PER_SECOND)
+    if timeout > 0 and input_size(data) > timeout * rate:
         # Too large to finish in time: do not spend the wait on it.
         request_conversion(cache_dir, key, data)
         return placeholder(key, data), False

@@ -98,6 +98,35 @@ class ConverterTests(ConverterTestCase):
                 shutil.copyfile(original, path)
                 self.assertEqual(self.convert(path).stdout, expected)
 
+    def test_real_xlam_matches_xlsx_without_changing_the_package(self):
+        fixtures = CONVERTER.parents[1] / "tests" / "fixtures"
+        for stem in ("sales", "sales-edited"):
+            with self.subTest(stem=stem):
+                addin = fixtures / (stem + ".xlam")
+                before = addin.read_bytes()
+                expected = self.convert(fixtures / (stem + ".xlsx")).stdout
+                self.assertEqual(self.convert(addin).stdout, expected)
+                blob = self.directory / "extensionless-blob"
+                blob.write_bytes(before)
+                self.assertEqual(self.convert(blob).stdout, expected)
+                self.assertEqual(addin.read_bytes(), before)
+
+    def test_xlam_with_default_main_type_matches_xlsx(self):
+        fixtures = CONVERTER.parents[1] / "tests" / "fixtures"
+        path = self.directory / "default-main.xlam"
+        with zipfile.ZipFile(fixtures / "sales.xlam") as original, \
+                zipfile.ZipFile(path, "w") as result:
+            types = ET.fromstring(original.read("[Content_Types].xml"))
+            for node in list(types):
+                if node.get("PartName") == "/xl/workbook.xml":
+                    types.remove(node)
+                elif node.get("Extension") == "xml":
+                    node.set("ContentType", "application/vnd.ms-excel.addin.macroEnabled.main+xml")
+            for info in original.infolist():
+                result.writestr(info, ET.tostring(types, encoding="utf-8")
+                                if info.filename == "[Content_Types].xml" else original.read(info))
+        self.assertEqual(self.convert(path).stdout, self.convert(fixtures / "sales.xlsx").stdout)
+
     def test_dates_times_booleans_numbers_and_errors(self):
         path = self.directory / "types.xlsx"
         book = Workbook()

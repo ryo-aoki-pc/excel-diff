@@ -61,6 +61,8 @@ class SetupExcelStageTests(unittest.TestCase):
         (scripts / "excel_stage_ooxml.py").write_bytes(MODULE_SOURCE)
         (scripts / "word_ooxml.py").write_bytes(WORD_MODULE_SOURCE)
         (scripts / "word_stage_ooxml.py").write_bytes(WORD_STAGE_MODULE_SOURCE)
+        for name in ("excel_formula.py", "excel_xlsb.py", "excel_xls.py", "excel_stage_xlsb.py", "excel_stage_xlsb_styles.py"):
+            (scripts / name).write_bytes(MODULE_SOURCE)
         spec = importlib.util.spec_from_file_location("excel_stage_setup", scripts / "setup-excel-diff.py")
         self.setup = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.setup)
@@ -183,6 +185,35 @@ class SetupExcelStageTests(unittest.TestCase):
                              self.run_git("config", "--global", "--get", "alias.excel-" + ending).stdout)
         self.assertEqual(self.run_git("config", "--global", "--get", "diff.word.textconv").stdout,
                          self.run_git("config", "--global", "--get", "diff.excel.textconv").stdout)
+
+    def test_previous_excel_word_attribute_block_is_replaced(self):
+        previous = self.setup.ATTRIBUTE_BLOCK.replace(
+            b"*.[xX][lL][sS][bB] diff=excel\n", b""
+        ).replace(b"*.[xX][lL][aA][mM] diff=excel\n", b"")
+        self.attributes.write_bytes(self.original_attributes + b"\n" + previous)
+        result, _, error = self.run_setup()
+        self.assertEqual(result, 0, error)
+        self.assertEqual(self.attributes.read_bytes(),
+                         self.original_attributes + b"\n" + self.setup.ATTRIBUTE_BLOCK)
+        self.assertEqual(self.attributes.read_bytes().count(b"# BEGIN"), 1)
+        self.run_git("init", "--quiet")
+        for filename in ("book.xlsb", "book.XLSB", "book.xlam", "book.XLAM"):
+            result = self.run_git("check-attr", "diff", "--", filename)
+            self.assertIn(": diff: excel", result.stdout)
+
+    def test_binary_excel_modules_are_installed_and_checked(self):
+        self.assertEqual(self.run_setup()[0], 0)
+        converter = self.setup.converter_library(self.installed_converter())
+        for name in ("excel_formula.py", "excel_xlsb.py", "excel_xls.py"):
+            self.assertEqual((converter / name).read_bytes(), MODULE_SOURCE)
+        for name in ("excel_formula.py", "excel_xlsb.py", "excel_stage_xlsb.py", "excel_stage_xlsb_styles.py"):
+            self.assertEqual((self.installed_helper().parent / name).read_bytes(), MODULE_SOURCE)
+        (converter / "excel_xlsb.py").write_bytes(b"changed module")
+        before = self.snapshot()
+        result, _, error = self.run_setup(check=True)
+        self.assertEqual(result, 1)
+        self.assertIn("変換スクリプト", error)
+        self.assertEqual(self.snapshot(), before)
 
     def test_check_is_read_only_and_discovers_registered_directory(self):
         self.assertEqual(self.run_setup()[0], 0)

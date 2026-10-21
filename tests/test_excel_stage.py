@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -580,13 +581,16 @@ class ExcelStageTests(unittest.TestCase):
                 )
 
     def test_supported_ooxml_extensions_accept_partial_staging(self):
-        for extension in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+        for extension in (".xlsx", ".xlsm", ".xltx", ".xltm", ".xlam"):
             with self.subTest(extension=extension):
                 path = self.repo / ("形式" + extension)
                 save_book(path)
                 self.git("add", "--", path.name)
                 self.git("commit", "--quiet", "-m", "OOXML extension fixture")
-                self.edit({("売上", "B1"): 25}, path=path)
+                book = load_workbook(io.BytesIO(path.read_bytes()))
+                book["売上"]["B1"] = 25
+                book.save(path)
+                book.close()
                 session = self.directory / ("format-" + extension[1:])
                 state = self.stage.prepare_session(self.repo, path.name, session)
                 self.select(session, state, {("売上", "B1")})
@@ -595,6 +599,162 @@ class ExcelStageTests(unittest.TestCase):
                 self.assertEqual(book["売上"]["B1"].value, 25)
                 self.assertEqual(book["売上"]["A1"].value, "元の値")
                 book.close()
+
+    def test_real_xlam_stages_only_selected_cells_through_git_alias(self):
+        fixtures = SCRIPT.parents[1] / "tests" / "fixtures"
+        path = self.repo / "アドイン.xlam"
+        path.write_bytes((fixtures / "sales.xlam").read_bytes())
+        self.git("add", "--", path.name)
+        self.git("commit", "--quiet", "-m", "Add-in fixture")
+        baseline = path.read_bytes()
+        path.write_bytes((fixtures / "sales-edited.xlam").read_bytes())
+        session = self.directory / "addin-session"
+        state = self.stage.prepare_session(self.repo, path.name, session)
+        self.select(session, state, {("売上", "B2")})
+        alias = "!" + " ".join(shlex.quote(value) for value in
+                               (Path(sys.executable).as_posix(), SCRIPT.as_posix()))
+        self.git("-c", "alias.excel-stage=" + alias,
+                 "excel-stage", "--apply-session", str(session))
+        staged = self.staged_bytes(path)
+        book = self.stage.Workbook(staged)
+        sheet = book.sheets[0].id
+        self.assertEqual(book.cells[(sheet, "B2")], self.stage.Cell("number", "12"))
+        self.assertEqual(book.cells[(sheet, "C3")], self.stage.Cell("number", "80"))
+        with zipfile.ZipFile(io.BytesIO(baseline)) as original, \
+                zipfile.ZipFile(io.BytesIO(staged)) as result:
+            original_types = {node.get("PartName"): node.get("ContentType")
+                              for node in ET.fromstring(original.read("[Content_Types].xml"))}
+            result_types = {node.get("PartName"): node.get("ContentType")
+                            for node in ET.fromstring(result.read("[Content_Types].xml"))}
+            self.assertEqual(result_types["/xl/workbook.xml"], original_types["/xl/workbook.xml"])
+            self.assertEqual(result_types["/xl/workbook.xml"],
+                             "application/vnd.ms-excel.addin.macroEnabled.main+xml")
+
+    def xlsb_fixture(self, extension=".xlsb"):
+        fixtures = SCRIPT.parents[1] / "tests" / "fixtures"
+        self.path = self.repo / ("バイナリ と空白" + extension)
+        baseline = (fixtures / "sales.xlsb").read_bytes()
+        working = (fixtures / "sales-edited.xlsb").read_bytes()
+        self.path.write_bytes(baseline)
+        self.git("add", "--", self.path.name)
+        self.git("commit", "--quiet", "-m", "Binary workbook fixture")
+        self.path.write_bytes(working)
+        return baseline, working
+
+    def test_xlsb_snapshots_and_cli_stage_only_selected_values(self):
+        baseline, working = self.xlsb_fixture()
+        notes_before = self.git("show", ":notes.txt")
+        session, state = self.prepare()
+        self.assertEqual(state["workbook"], "xlsb")
+        self.assertEqual((session / "base.xlsb").read_bytes(), baseline)
+        self.assertEqual((session / "work.xlsb").read_bytes(), working)
+        self.assertFalse((session / "base.xlsx").exists())
+        self.assertFalse((session / "work.xlsx").exists())
+        base = self.stage.workbook_from_data(baseline)
+        source = self.stage.workbook_from_data(working)
+        format_base, format_source, _ = base.compare_formats(source).projection()
+        for sheet in state["sheets"]:
+            self.assertTrue(sheet["formats_filename"].endswith(".formats.txt"))
+            self.assertEqual(self.git("show", "HEAD:" + sheet["formats_filename"],
+                                      cwd=session / "picker").decode("utf-8"), format_base[sheet["id"]])
+            self.assertEqual((session / "picker" / sheet["formats_filename"]).read_text(encoding="utf-8"),
+                             format_source[sheet["id"]])
+        self.assertIn('["B2","format",', format_source[base.sheets[0].id])
+        selection = {("売上", "B2"), ("売上", "D4"), ("売上", "E5"),
+                     ("売上", "F3"), ("売上", "A6"), ("売上", "AMK3"),
+                     ("売上", "A50"), ("備考", "B2")}
+        self.select(session, state, selection)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--apply-session", str(session)],
+            cwd=self.repo, env=self.env, capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        base = self.stage.workbook_from_data(baseline)
+        source = self.stage.workbook_from_data(working)
+        staged = self.stage.workbook_from_data(self.staged_bytes())
+        self.assertEqual(staged.workbook_format, "xlsb")
+        expected = dict(base.cells)
+        for name, coordinate in selection:
+            key = (next(sheet.id for sheet in base.sheets if sheet.name == name), coordinate)
+            if key in source.cells:
+                expected[key] = source.cells[key]
+            else:
+                expected.pop(key, None)
+            self.assertEqual(staged.effective_style(key), base.effective_style(key))
+        self.assertEqual(staged.cells, expected)
+        self.assertEqual(self.path.read_bytes(), working)
+        self.assertEqual(self.git("show", ":notes.txt"), notes_before)
+
+    def test_xlsb_value_and_format_can_be_staged_independently(self):
+        baseline, working = self.xlsb_fixture()
+        base = self.stage.workbook_from_data(baseline)
+        source = self.stage.workbook_from_data(working)
+        key = (base.sheets[0].id, "B2")
+        for values, formats in ((True, False), (False, True), (True, True)):
+            with self.subTest(values=values, formats=formats):
+                self.path.write_bytes(baseline)
+                self.git("add", "--", self.path.name)
+                self.path.write_bytes(working)
+                session = self.directory / ("xlsb-independent-" + str(values) + str(formats))
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                selected = {("売上", "B2")}
+                self.select(session, state, selected if values else (), selected if formats else ())
+                self.assertEqual(self.stage.apply_session(session), (int(values), int(formats)))
+                staged = self.stage.workbook_from_data(self.staged_bytes())
+                self.assertEqual(staged.cells[key], (source if values else base).cells[key])
+                for cell_key in set(base.cell_styles) | set(source.cell_styles) | set(base.cells):
+                    expected = source if formats and cell_key == key else base
+                    self.assertEqual(staged.stylesheet().exact(staged.effective_style(cell_key)),
+                                     expected.stylesheet().exact(expected.effective_style(cell_key)), cell_key)
+                self.assertEqual({k: v for k, v in staged.cells.items() if k != key},
+                                 {k: v for k, v in base.cells.items() if k != key})
+                self.assertEqual(self.path.read_bytes(), working)
+
+    def test_xlsb_fill_and_empty_cell_formats_can_be_staged_without_values(self):
+        baseline, working = self.xlsb_fixture()
+        base = self.stage.workbook_from_data(baseline)
+        source = self.stage.workbook_from_data(working)
+        for coordinates in (("A1",), ("M3",), ("A1", "M3")):
+            with self.subTest(coordinates=coordinates):
+                self.path.write_bytes(baseline)
+                self.git("add", "--", self.path.name)
+                self.path.write_bytes(working)
+                session = self.directory / ("xlsb-formats-" + "-".join(coordinates))
+                state = self.stage.prepare_session(self.repo, self.path.name, session)
+                selected = {("売上", coordinate) for coordinate in coordinates}
+                self.select(session, state, formats=selected)
+                self.assertEqual(self.stage.apply_session(session), (0, len(coordinates)))
+                staged = self.stage.workbook_from_data(self.staged_bytes())
+                self.assertEqual(staged.cells, base.cells)
+                for key in set(base.cell_styles) | set(source.cell_styles) | set(base.cells):
+                    expected = source if key[0] == base.sheets[0].id and key[1] in coordinates else base
+                    self.assertEqual(staged.stylesheet().exact(staged.effective_style(key)),
+                                     expected.stylesheet().exact(expected.effective_style(key)), key)
+                self.assertNotIn((base.sheets[0].id, "M3"), staged.cells)
+                self.assertEqual(self.path.read_bytes(), working)
+
+    def test_xlsb_content_with_xlsx_filename_uses_binary_snapshots(self):
+        baseline, working = self.xlsb_fixture(extension=".xlsx")
+        session, state = self.prepare()
+        self.assertEqual(state["workbook"], "xlsb")
+        self.assertEqual((session / "base.xlsb").read_bytes(), baseline)
+        self.assertEqual((session / "work.xlsb").read_bytes(), working)
+        self.select(session, state, {("売上", "B2")})
+        self.assertEqual(self.stage.apply_session(session), (1, 0))
+        book = self.stage.workbook_from_data(self.staged_bytes())
+        self.assertEqual(book.workbook_format, "xlsb")
+        sheet = book.sheets[0].id
+        self.assertEqual(book.cells[(sheet, "B2")], self.stage.Cell("number", "12"))
+        self.assertEqual(book.cells[(sheet, "C3")], self.stage.Cell("number", "80"))
+
+    def test_old_xlsx_session_without_workbook_format_can_still_be_applied(self):
+        self.edit({("売上", "A1"): "古いセッションの選択"})
+        session, state = self.prepare()
+        state.pop("workbook", None)
+        self.stage.write_json(session / "session.json", state)
+        self.select(session, state, {("売上", "A1")})
+        self.assertEqual(self.stage.apply_session(session), (1, 0))
+        self.assertEqual(self.staged_values()["売上"]["A1"].value, "古いセッションの選択")
 
     def test_deleted_and_corrupt_workbooks_are_rejected(self):
         self.path.unlink()
