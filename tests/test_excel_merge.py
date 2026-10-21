@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -552,7 +553,7 @@ class ExcelMergeTests(unittest.TestCase):
 
     def test_unsupported_extensions_on_either_side_are_rejected(self):
         for side in ("target", "source"):
-            for suffix in (".xls", ".xlsb", ".txt"):
+            for suffix in (".xls", ".txt"):
                 with self.subTest(side=side, suffix=suffix):
                     other = self.directory / (side + suffix)
                     other.write_bytes(getattr(self, side).read_bytes())
@@ -585,6 +586,183 @@ class ExcelMergeTests(unittest.TestCase):
         self.source = macro
         _, state = self.prepare()
         self.assertEqual(state["differences"], 5)
+
+    def test_real_xlam_imports_only_selected_cells_through_git_alias(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        self.target = self.directory / "取り込み先.xlam"
+        self.source = self.directory / "取り込み元.xlam"
+        self.target.write_bytes((fixtures / "sales.xlam").read_bytes())
+        self.source.write_bytes((fixtures / "sales-edited.xlam").read_bytes())
+        baseline, source = self.target.read_bytes(), self.source.read_bytes()
+        directory, state = self.prepare()
+        self.select(directory, state, {("売上", "B2")})
+        alias = "!" + " ".join(shlex.quote(value) for value in
+                               (Path(sys.executable).as_posix(), SCRIPT.as_posix()))
+        self.git("-c", "alias.excel-merge=" + alias,
+                 "excel-merge", "--apply-merge-session", str(directory))
+        book = self.stage.Workbook(self.target.read_bytes())
+        sheet = book.sheets[0].id
+        self.assertEqual(book.cells[(sheet, "B2")], self.stage.Cell("number", "12"))
+        self.assertEqual(book.cells[(sheet, "C3")], self.stage.Cell("number", "80"))
+        self.assertEqual(self.source.read_bytes(), source)
+        with zipfile.ZipFile(io.BytesIO(baseline)) as original, zipfile.ZipFile(self.target) as result:
+            original_types = {node.get("PartName"): node.get("ContentType")
+                              for node in ET.fromstring(original.read("[Content_Types].xml"))}
+            result_types = {node.get("PartName"): node.get("ContentType")
+                            for node in ET.fromstring(result.read("[Content_Types].xml"))}
+            self.assertEqual(result_types["/xl/workbook.xml"], original_types["/xl/workbook.xml"])
+            self.assertEqual(result_types["/xl/workbook.xml"],
+                             "application/vnd.ms-excel.addin.macroEnabled.main+xml")
+
+    def test_xlsb_lazygit_and_winmerge_import_the_same_selected_values(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        baseline = (fixtures / "sales.xlsb").read_bytes()
+        changed = (fixtures / "sales-edited.xlsb").read_bytes()
+        selection = {("売上", "B2"), ("売上", "D4"), ("売上", "E5"),
+                     ("売上", "F3"), ("売上", "A6"), ("売上", "AMK3"),
+                     ("売上", "A50"), ("備考", "B2")}
+        self.target = self.directory / "取り込み先 と空白.xlsb"
+        self.source = self.directory / "取り込み元 と空白.xlsb"
+        results = []
+        for tool in ("lazygit", "winmerge"):
+            with self.subTest(tool=tool):
+                self.target.write_bytes(baseline)
+                self.source.write_bytes(changed)
+                directory, state = self.prepare(tool)
+                self.assertEqual(state["workbook"], "xlsb")
+                self.assertEqual((directory / "base.xlsb").read_bytes(), baseline)
+                self.assertEqual((directory / "work.xlsb").read_bytes(), changed)
+                self.assertEqual(state["format_differences"], 3)
+                if tool == "lazygit":
+                    self.select(directory, state, selection)
+                else:
+                    lines = self.copied_lines(directory, state, selection)
+                    chosen, _ = self.run_win(directory, state, lambda _: ("\n".join(lines) + "\n").encode("utf-8-sig"))
+                    self.assertEqual(len(chosen.values), len(selection))
+                    self.assertEqual(chosen.formats, set())
+                self.assertEqual(self.stage.apply_merge_session(directory), (len(selection), 0))
+                base = self.stage.workbook_from_data(baseline)
+                source = self.stage.workbook_from_data(changed)
+                result = self.stage.workbook_from_data(self.target.read_bytes())
+                self.assertEqual(result.workbook_format, "xlsb")
+                expected = dict(base.cells)
+                for name, coordinate in selection:
+                    key = (next(sheet.id for sheet in base.sheets if sheet.name == name), coordinate)
+                    if key in source.cells:
+                        expected[key] = source.cells[key]
+                    else:
+                        expected.pop(key, None)
+                    self.assertEqual(result.effective_style(key), base.effective_style(key))
+                self.assertEqual(result.cells, expected)
+                self.assertEqual(self.source.read_bytes(), changed)
+                results.append(self.target.read_bytes())
+        self.assertEqual(results[0], results[1])
+
+    def test_xlsb_values_and_formats_are_independent_in_both_merge_tools(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        baseline = (fixtures / "sales.xlsb").read_bytes()
+        changed = (fixtures / "sales-edited.xlsb").read_bytes()
+        self.target = self.directory / "書式取り込み先.xlsb"
+        self.source = self.directory / "書式取り込み元.xlsb"
+        self.source.write_bytes(changed)
+        base = self.stage.workbook_from_data(baseline)
+        source = self.stage.workbook_from_data(changed)
+        key = (base.sheets[0].id, "B2")
+        results = {}
+        for tool in ("lazygit", "winmerge"):
+            for values, formats in ((True, False), (False, True), (True, True)):
+                with self.subTest(tool=tool, values=values, formats=formats):
+                    self.target.write_bytes(baseline)
+                    directory, state = self.prepare(tool)
+                    selected = {("売上", "B2")}
+                    value_keys = selected if values else set()
+                    format_keys = selected if formats else set()
+                    if tool == "lazygit":
+                        for sheet in state["sheets"]:
+                            self.assertTrue(sheet["formats_filename"].endswith(".formats.txt"))
+                        self.select(directory, state, value_keys, format_keys)
+                    else:
+                        left, right, _ = self.win_paths(directory, state)
+                        before = left.read_text(encoding="utf-8-sig").splitlines()
+                        after = right.read_text(encoding="utf-8-sig").splitlines()
+                        self.assertEqual(len(before), len(after))
+                        heading = '# 書式 シート 1: "売上"'
+                        self.assertEqual(after[before.index(heading)], heading)
+                        lines = self.copied_lines(directory, state, value_keys, format_keys)
+                        chosen, _ = self.run_win(directory, state,
+                            lambda _: ("\n".join(lines) + "\n").encode("utf-8-sig"))
+                        self.assertEqual((len(chosen.values), len(chosen.formats)), (int(values), int(formats)))
+                    self.assertEqual(self.stage.apply_merge_session(directory), (int(values), int(formats)))
+                    applied = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+                    self.assertEqual((applied["count"], applied["format_count"]), (int(values), int(formats)))
+                    result = self.stage.workbook_from_data(self.target.read_bytes())
+                    self.assertEqual(result.cells[key], (source if values else base).cells[key])
+                    self.assertEqual({k: v for k, v in result.cells.items() if k != key},
+                                     {k: v for k, v in base.cells.items() if k != key})
+                    for cell_key in set(base.cell_styles) | set(source.cell_styles) | set(base.cells):
+                        expected = source if formats and cell_key == key else base
+                        self.assertEqual(result.stylesheet().exact(result.effective_style(cell_key)),
+                                         expected.stylesheet().exact(expected.effective_style(cell_key)), cell_key)
+                    self.assertEqual(self.source.read_bytes(), changed)
+                    results[(tool, values, formats)] = self.target.read_bytes()
+        for values, formats in ((True, False), (False, True), (True, True)):
+            self.assertEqual(results[("lazygit", values, formats)], results[("winmerge", values, formats)])
+
+    def test_xlsb_fill_and_blank_cell_formats_import_from_both_merge_tools(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        baseline = (fixtures / "sales.xlsb").read_bytes()
+        changed = (fixtures / "sales-edited.xlsb").read_bytes()
+        self.target = self.directory / "空セル取り込み先.xlsb"
+        self.source = self.directory / "空セル取り込み元.xlsb"
+        self.source.write_bytes(changed)
+        base = self.stage.workbook_from_data(baseline)
+        source = self.stage.workbook_from_data(changed)
+        results = {}
+        for tool in ("lazygit", "winmerge"):
+            for coordinates in (("A1",), ("M3",), ("A1", "M3")):
+                with self.subTest(tool=tool, coordinates=coordinates):
+                    self.target.write_bytes(baseline)
+                    directory, state = self.prepare(tool)
+                    selected = {("売上", coordinate) for coordinate in coordinates}
+                    if tool == "lazygit":
+                        self.select(directory, state, formats=selected)
+                    else:
+                        lines = self.copied_lines(directory, state, (), selected)
+                        chosen, _ = self.run_win(directory, state,
+                            lambda _: ("\n".join(lines) + "\n").encode("utf-8-sig"))
+                        self.assertEqual((len(chosen.values), len(chosen.formats)), (0, len(coordinates)))
+                    self.assertEqual(self.stage.apply_merge_session(directory), (0, len(coordinates)))
+                    result = self.stage.workbook_from_data(self.target.read_bytes())
+                    self.assertEqual(result.cells, base.cells)
+                    self.assertNotIn((base.sheets[0].id, "M3"), result.cells)
+                    for key in set(base.cell_styles) | set(source.cell_styles) | set(base.cells):
+                        expected = source if key[0] == base.sheets[0].id and key[1] in coordinates else base
+                        self.assertEqual(result.stylesheet().exact(result.effective_style(key)),
+                                         expected.stylesheet().exact(expected.effective_style(key)), key)
+                    self.assertEqual(self.source.read_bytes(), changed)
+                    results[(tool, coordinates)] = self.target.read_bytes()
+        for coordinates in (("A1",), ("M3",), ("A1", "M3")):
+            self.assertEqual(results[("lazygit", coordinates)], results[("winmerge", coordinates)])
+
+    def test_xlsb_and_xlsx_import_is_rejected_in_either_direction(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        message = "形式の違うブック（xlsb と xlsx など）は取り込めません。同じ形式のブックを 2 つ指定してください。"
+        for target_format, source_format in (("xlsb", "xlsx"), ("xlsx", "xlsb")):
+            for tool in ("lazygit", "winmerge"):
+                with self.subTest(target=target_format, source=source_format, tool=tool):
+                    self.target = self.directory / ("混合先." + target_format)
+                    self.source = self.directory / ("混合元." + source_format)
+                    self.target.write_bytes((fixtures / ("sales." + target_format)).read_bytes())
+                    self.source.write_bytes((fixtures / ("sales-edited." + source_format)).read_bytes())
+                    source_before = self.source.read_bytes()
+                    self.assert_unchanged_failure(lambda: self.prepare(tool), message)
+                    self.assertEqual(self.source.read_bytes(), source_before)
+
+    def test_mixed_workbook_contents_are_rejected_even_with_matching_extensions(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        self.target.write_bytes((fixtures / "sales.xlsb").read_bytes())
+        self.source.write_bytes((fixtures / "sales-edited.xlsx").read_bytes())
+        self.assert_unchanged_failure(lambda: self.prepare(), "形式の違うブック")
 
     def test_unsupported_cells_on_either_side_are_hidden_from_source_projection(self):
         for side in ("target", "source"):

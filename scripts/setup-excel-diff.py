@@ -21,6 +21,8 @@ ATTRIBUTE_BLOCK = (
     "*.[xX][lL][sS][mM] diff=excel\n"
     "*.[xX][lL][tT][xX] diff=excel\n"
     "*.[xX][lL][tT][mM] diff=excel\n"
+    "*.[xX][lL][sS][bB] diff=excel\n"
+    "*.[xX][lL][aA][mM] diff=excel\n"
     "*.[xX][lL][sS] diff=excel\n"
     "*.[xX][lL][tT] diff=excel\n"
     "*.[dD][oO][cC][xX] diff=word\n"
@@ -30,8 +32,10 @@ ATTRIBUTE_BLOCK = (
     "# END lazygit Excel textconv (setup-excel-diff.py)\n"
 ).encode("ascii")
 
-CONVERTER_MODULES = ("word_ooxml.py",)
-STAGE_MODULES = ("excel_stage_ooxml.py", "word_ooxml.py", "word_stage_ooxml.py")
+CONVERTER_MODULES = ("word_ooxml.py", "excel_formula.py", "excel_xlsb.py", "excel_xls.py")
+STAGE_MODULES = ("excel_stage_ooxml.py", "word_ooxml.py", "word_stage_ooxml.py",
+                 "excel_formula.py", "excel_xlsb.py", "excel_stage_xlsb.py",
+                 "excel_stage_xlsb_styles.py")
 
 
 def xdg_directory(variable, fallback):
@@ -332,7 +336,7 @@ def validate_uninstall_directory(directory, root):
             for module in entry.iterdir():
                 if linked_directory(module):
                     raise RuntimeError("導入先にリンクがあるため削除しません: " + str(module))
-                if ((module.name == "word_ooxml.py" and module.is_file())
+                if ((module.name in CONVERTER_MODULES and module.is_file())
                         or (module.name == "__pycache__" and module.is_dir())):
                     continue
                 raise RuntimeError("導入スクリプトが作った形ではないため削除しません: " + str(entry))

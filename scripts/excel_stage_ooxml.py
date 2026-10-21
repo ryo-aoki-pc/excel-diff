@@ -486,6 +486,9 @@ class _Styles:
         indexed = _child(colors, "indexedColors") if colors is not None else None
         self.palette = tuple(node.get("rgb", "").upper()[-6:] for node in indexed) if indexed is not None else _DEFAULT_PALETTE
 
+    def importer(self, source):
+        return _StyleImporter(self, source)
+
     def numfmt(self, value):
         index = _index(value)
         if index < 0:
@@ -826,7 +829,7 @@ class FormatComparison:
 
     def unsupported_reason(self, key):
         if self._importer is None:
-            self._importer = _StyleImporter(self.target_styles, self.source_styles)
+            self._importer = self.target_styles.importer(self.source_styles)
         index = self.source.effective_style(key)
         if index not in self._problems:
             self._problems[index] = self._importer.problem(index)
@@ -1497,7 +1500,7 @@ class Workbook:
             return self.data
         updates, removed, styles = {}, set(), {}
         if restyled:
-            importer = _StyleImporter(comparison.target_styles, comparison.source_styles)
+            importer = comparison.target_styles.importer(comparison.source_styles)
             for key in restyled:
                 styles[key] = importer.index_for(source.effective_style(key))
             if importer.modified:

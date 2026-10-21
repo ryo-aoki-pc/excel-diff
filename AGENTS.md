@@ -24,7 +24,12 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 
 - `scripts/excel-textconv.py` — Git の textconv で、Excel のセルと Word の段落・表などを差分用のテキストにする
 - `scripts/excel-stage.py` — Excel・Word の変更を専用画面で部分ステージし、任意の 2 ファイル間で選んだ変更を取り込む
-- `scripts/excel_stage_ooxml.py` — ブックのセルの値・数式と書式を比較し、選んだ内容だけを作り直す
+- `scripts/excel_stage_ooxml.py` — xlsx 系のブックのセルの値・数式と書式を比較し、選んだ内容だけを作り直す
+- `scripts/excel_formula.py` — BIFF8・BIFF12 の数式のトークン列を式の文字列に戻す
+- `scripts/excel_xls.py` — xls・xlt の BIFF8 の数式を差分表示用に読む
+- `scripts/excel_xlsb.py` — xlsb の記録・セル・数式などを読み、差分表示用のテキストにする
+- `scripts/excel_stage_xlsb.py` — xlsb のセルの値・数式と書式を比較し、選んだ内容だけを作り直す
+- `scripts/excel_stage_xlsb_styles.py` — xlsb の styles.bin を比較し、必要な書式の定義を追記する
 - `scripts/word_ooxml.py` — Word の段落・表・書式などを比較用のテキストにする
 - `scripts/word_stage_ooxml.py` — Word の変更を比較し、選んだ段落・セル・表などだけを作り直す
 - `scripts/setup-excel-diff.py` — Excel・Word の差分表示・部分ステージ・取り込みを、その端末の Git 全体に設定する
@@ -33,6 +38,15 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 - `tests/test_excel_stage.py` — Git のインデックスを使った値・数式と書式の部分ステージの自動テスト
 - `tests/test_excel_stage_ooxml.py` — セルの値・数式と書式の比較、ブックの再構成の自動テスト
 - `tests/test_excel_merge.py` — 任意の 2 つのブックの値・数式と書式の取り込みの自動テスト
+- `tests/test_excel_formula.py` — BIFF8・BIFF12 の数式の解読の自動テスト
+- `tests/test_xls_textconv.py`・`tests/test_xlsb_textconv.py` — xls・xlsb の数式の表示と xlsx との突き合わせの自動テスト
+- `tests/test_excel_stage_xlsb.py` — xlsb のセルの値・数式の比較と作り直し、部分ステージと取り込みの自動テスト
+- `tests/test_excel_stage_xlsb_styles.py` — xlsb の書式の比較・追記・取り込みの自動テスト
+- `tests/test_excel_stage_xlsb_performance.py`・`tests/test_xlsb_record_views.py` — 読み込み・検証の処理と、位置から参照する記録の自動テスト
+- `tests/test_xlsb_formats_oracle.py` — Excel が作った xlsx・xlsb の書式の説明の突き合わせ
+- `tests/xlsb_builder.py`・`tests/xlsb_style_builder.py` — BIFF12 の記録・数式・書式と試験用のパッケージを組み立てる
+- `tests/fixtures/` — Excel で作った試験用のブックと、作成用の `make_fixtures.ps1`
+- `tests/excel_open.ps1`・`tests/test_excel_open.py` — Windows の Excel で読み取り結果と作り直した xlsb を確かめる
 - `tests/word_fixtures.py` — Word の自動テストに使う文書を作る
 - `tests/test_word_ooxml.py` — Word の読み込み・表示・比較用データの自動テスト
 - `tests/test_word_stage_ooxml.py` — Word の変更の比較と文書の再構成の自動テスト

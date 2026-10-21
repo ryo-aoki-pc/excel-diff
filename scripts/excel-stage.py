@@ -26,7 +26,7 @@ class StageError(ValueError):
     """An unsupported selection or a changed source; never apply blindly."""
 
 
-SUPPORTED = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+SUPPORTED = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xlam", ".xlsb"}
 WORD_SUPPORTED = {".docx", ".docm", ".dotx", ".dotm"}
 EXCEL_FAMILY = SUPPORTED | {".xls", ".xlt", ".xlsb"}
 
@@ -46,7 +46,7 @@ _TEXTS = {
         "work_changed": "作業ファイルが選択開始後に変更されています。画面を閉じて選び直してください。",
         "open_elsewhere": "取り込み先を Excel などで開いているなら閉じてからやり直してください: ",
         "open_retry": "取り込み先を Excel などで開いているなら閉じてから再試行してください: ",
-        "merge_suffix": "取り込みの対象は .xlsx / .xlsm / .xltx / .xltm です: ",
+        "merge_suffix": "取り込みの対象は .xlsx / .xlsm / .xltx / .xltm / .xlam / .xlsb です: ",
         "staged": "{}を Excel のままステージしました。q で元の画面へ戻ってください。",
         "nothing_selected": "セル変更が選択されていません。Enter・Space でハンクを選び、X で反映してください。",
         "stage_done": "Excel の部分ステージを反映しました。",
@@ -270,7 +270,7 @@ def prepare_session(repo, relative, directory, progress=None):
     kind = _kind(relative)
     texts = _TEXTS[kind]
     if kind == "excel" and Path(relative).suffix.lower() not in SUPPORTED:
-        raise StageError("部分ステージの対象は Excel（.xlsx / .xlsm / .xltx / .xltm）と Word（.docx / .docm / .dotx / .dotm）です。それ以外のファイルは全体をステージしてください。")
+        raise StageError("部分ステージの対象は Excel（.xlsx / .xlsm / .xltx / .xltm / .xlam / .xlsb）と Word（.docx / .docm / .dotx / .dotm）です。それ以外のファイルは全体をステージしてください。")
     work_path = repo / relative
     try:
         normalized = work_path.resolve().relative_to(repo).as_posix()
@@ -304,9 +304,10 @@ def prepare_session(repo, relative, directory, progress=None):
         write_json(directory / "session.json", state)
         return state
     base, work, projections = _load_books(base_data, work_data)
-    _save_snapshots(directory, base_data, work_data)
+    _save_snapshots(directory, base_data, work_data, "." + base.workbook_format)
     sheets = _build_picker(directory, base, projections, texts["index_commit"])
-    state = {"repo": str(repo), "path": relative, "index": str(index), "mode": mode,
+    state = {"workbook": base.workbook_format, "repo": str(repo), "path": relative,
+             "index": str(index), "mode": mode,
              "oid": oid, "base_sha256": hashlib.sha256(base_data).hexdigest(),
              "work_sha256": hashlib.sha256(work_data).hexdigest(),
              "sheets": sheets, "target": "index", "applied": False}
@@ -314,8 +315,32 @@ def prepare_session(repo, relative, directory, progress=None):
     return state
 
 
+def workbook_from_data(data):
+    """Choose the workbook implementation from package content, not its suffix."""
+    try:
+        from excel_xlsb import is_xlsb
+    except ModuleNotFoundError as error:
+        # A copied OOXML-only helper can still run without the binary modules.
+        if error.name != "excel_xlsb":
+            raise
+        binary = False
+    else:
+        binary = is_xlsb(data)
+
+    if binary:
+        from excel_stage_xlsb import Workbook as BinaryWorkbook
+
+        book, kind = BinaryWorkbook(data), "xlsb"
+    else:
+        book, kind = Workbook(data), "xlsx"
+    book.workbook_format = kind
+    return book
+
+
 def _load_books(base_data, work_data):
-    base, work = Workbook(base_data), Workbook(work_data)
+    base, work = workbook_from_data(base_data), workbook_from_data(work_data)
+    if base.workbook_format != work.workbook_format:
+        raise StageError("形式の違うブック（xlsb と xlsx など）は取り込めません。同じ形式のブックを 2 つ指定してください。")
     base.assert_compatible(work)
     format_baseline, format_changed, coordinates = base.compare_formats(work).projection()
     return base, work, Projections(base.projection(work), work.projection(base),
@@ -522,12 +547,17 @@ def _session_books(directory, state):
     texts = _TEXTS[state.get("format", "excel")]
     if "base_sha256" not in state:
         raise StageError("選択画面の形式が更新されています。画面を閉じて選び直してください。")
-    base_data = (directory / "base.xlsx").read_bytes()
-    work_data = (directory / "work.xlsx").read_bytes()
+    kind = state.get("workbook", "xlsx")
+    if kind not in ("xlsx", "xlsb"):
+        raise StageError("選択画面の形式が更新されています。画面を閉じて選び直してください。")
+    base_data = (directory / ("base." + kind)).read_bytes()
+    work_data = (directory / ("work." + kind)).read_bytes()
     if (hashlib.sha256(base_data).hexdigest() != state["base_sha256"] or
             hashlib.sha256(work_data).hexdigest() != state["work_sha256"]):
         raise StageError(texts["snapshots_changed"])
-    base, work = Workbook(base_data), Workbook(work_data)
+    base, work = workbook_from_data(base_data), workbook_from_data(work_data)
+    if base.workbook_format != kind or work.workbook_format != kind:
+        raise StageError(texts["snapshots_changed"])
     return base, work
 
 
@@ -876,8 +906,9 @@ def prepare_merge_session(target, source, directory, tool="lazygit"):
     base_data, work_data = target.read_bytes(), source.read_bytes()
     base, work, projections = _load_books(base_data, work_data)
     projections = _merge_projections(base, work, projections)
-    _save_snapshots(directory, base_data, work_data)
-    state = {"target": "file", "tool": tool, "path": str(target), "source": str(source),
+    _save_snapshots(directory, base_data, work_data, "." + base.workbook_format)
+    state = {"workbook": base.workbook_format, "target": "file", "tool": tool,
+             "path": str(target), "source": str(source),
              "base_sha256": hashlib.sha256(base_data).hexdigest(),
              "work_sha256": hashlib.sha256(work_data).hexdigest(),
              "differences": projections.differences, "format_differences": projections.format_differences,
