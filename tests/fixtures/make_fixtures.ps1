@@ -157,6 +157,42 @@ function Edit-Sales($book) {
     $notes.Range('B2').Value2 = 20
 }
 
+function Build-Phonetic($book) {
+    while ($book.Worksheets.Count -gt 1) {
+        $book.Worksheets.Item($book.Worksheets.Count).Delete()
+    }
+    $sheet = $book.Worksheets.Item(1); $sheet.Name = 'ふりがな'
+    $sheet.Range('A1').Value2 = '今日は東京へ行く'
+    $sheet.Range('A1').SetPhonetic()
+    $sheet.Range('A2').Value2 = '東京と大阪'
+    $sheet.Range('A2').SetPhonetic()
+    $sheet.Range('A3').Value2 = 'あいう漢字'
+    $sheet.Range('A3').SetPhonetic()
+    $sheet.Range('A4').Value2 = '山田太郎'
+    [void]$sheet.Range('A4').Phonetics.Add(1, 2, 'やまだ')
+    [void]$sheet.Range('A4').Phonetics.Add(3, 2, 'たろう')
+    $sheet.Range('A5').Value2 = '第1回東京会議の議事録'
+    $sheet.Range('A5').SetPhonetic()
+    $sheet.Range('A5').Characters(4, 2).Font.Bold = $true
+    $sheet.Range('A6').Value2 = '漢字'
+    $sheet.Range('A6').SetPhonetic()
+    $sheet.Range('A6').Phonetic.CharacterType = 2
+    $sheet.Range('A6').Phonetic.Alignment = 2
+    $sheet.Range('A7').Value2 = '大阪'
+    [void]$sheet.Range('A7').Phonetics.Add(1, 2, 'おおさか')
+    $sheet.Range('B1').Value2 = 1
+    $sheet.Range('B2').Formula = '=LEN(A1)'
+}
+
+function Edit-Phonetic($book) {
+    $sheet = $book.Worksheets.Item('ふりがな')
+    $sheet.Range('A2').Value2 = '東京と名古屋'
+    $sheet.Range('A2').SetPhonetic()
+    $sheet.Range('B1').Value2 = 2
+    $sheet.Range('A8').Value2 = '新しい行'
+    $sheet.Range('A8').SetPhonetic()
+}
+
 function Build-ManyRows($book) {
     $sheet = $book.Worksheets.Item(1); $sheet.Name = 'Data'
     foreach ($r in 40..200) {
@@ -313,6 +349,15 @@ try {
     $written += Save-As $book 'sales-edited.xlsb' 50
     $written += Save-As $book 'sales-edited.xlsx' 51
     $written += Save-As $book 'sales-edited.xlam' 55
+    $book.Close($false)
+
+    $book = $excel.Workbooks.Add()
+    Build-Phonetic $book
+    $written += Save-As $book 'phonetic.xlsb' 50
+    $written += Save-As $book 'phonetic.xlsx' 51
+    Edit-Phonetic $book
+    $written += Save-As $book 'phonetic-edited.xlsb' 50
+    $written += Save-As $book 'phonetic-edited.xlsx' 51
     $book.Close($false)
 
     $book = $excel.Workbooks.Add()

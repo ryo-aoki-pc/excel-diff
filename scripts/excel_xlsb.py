@@ -580,7 +580,14 @@ def _rich_string(reader):
         reader.take(reader.uint() * 4)
     if flags & 2:
         reader.wide()
-        reader.take(reader.uint() * 10)
+        count = reader.uint()
+        remaining = len(reader.data) - reader.position
+        # Excel writes 6-byte runs plus shared settings; MS-XLSB specifies
+        # 12-byte PhRun entries without trailing settings. Accept both layouts.
+        # Zero runs with no remaining bytes are the empty MS-XLSB layout.
+        if remaining not in (count * 6 + 4, count * 12):
+            raise WorkbookError("xlsb の文字列のふりがなの情報が壊れています")
+        reader.take(remaining)
     return value, bool(flags & 1)
 
 
