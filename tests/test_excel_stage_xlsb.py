@@ -181,6 +181,50 @@ class XlsbStagingTests(unittest.TestCase):
                         else:
                             self.assertEqual(actual_reason, expected_reason, (binary_sheet.name, coordinate))
 
+    def test_phonetic_projection_and_unsupported_reasons_match_ooxml_oracle(self):
+        names = ("phonetic", "phonetic-edited")
+        binary = tuple(XLSB.Workbook((FIXTURES / (name + ".xlsb")).read_bytes()) for name in names)
+        xml = tuple(OOXML.Workbook((FIXTURES / (name + ".xlsx")).read_bytes()) for name in names)
+        for index in (0, 1):
+            with self.subTest(version=names[index]):
+                actual = binary[index].projection(binary[1 - index])
+                expected = xml[index].projection(xml[1 - index])
+                self.assertEqual([sheet.name for sheet in binary[index].sheets], ["ふりがな"])
+                self.assertEqual([sheet.name for sheet in xml[index].sheets], ["ふりがな"])
+                self.assertEqual([actual[sheet.id] for sheet in binary[index].sheets],
+                                 [expected[sheet.id] for sheet in xml[index].sheets])
+                coordinates = {key[1] for key in binary[index].cells} | {key[1] for key in xml[index].cells}
+                for coordinate in coordinates:
+                    key = ("1", coordinate)
+                    self.assertEqual(binary[index].unsupported_reason(key), xml[index].unsupported_reason(key), key)
+                self.assertEqual(binary[index].unsupported_reason(("1", "A5")), "リッチテキスト")
+
+    def test_rebuild_phonetic_fixture_changes_preserves_shared_strings(self):
+        base = XLSB.Workbook((FIXTURES / "phonetic.xlsb").read_bytes())
+        source = XLSB.Workbook((FIXTURES / "phonetic-edited.xlsb").read_bytes())
+        changed = {key for key in set(base.cells) | set(source.cells)
+                   if base.cells.get(key) != source.cells.get(key)}
+        self.assertEqual(changed, {("1", "A2"), ("1", "B1"), ("1", "A8")})
+        selected = {key for key in changed
+                    if not base.unsupported_reason(key) and not source.unsupported_reason(key)}
+        self.assertEqual(selected, changed)
+        output, result = self.assert_rebuild(base, source, selected)
+        self.assert_indexes(output)
+        self.assertEqual(parts(output)["xl/sharedStrings.bin"], parts(base.data)["xl/sharedStrings.bin"])
+
+    def test_shared_strings_with_multiple_phonetic_runs_are_plain_values(self):
+        inline = rich_string("東京と大阪", phonetic="トウキョウオオサカ",
+                             phonetic_runs=((0, 0, 2), (5, 3, 2)))
+        data = minimal([row_header(0, spans=((0, 1),)), cell(0, "shared-string", 0),
+                        cell(1, "rich-string", inline)],
+                       shared_strings=[rich_string("今日は東京へ行く", phonetic="キョウトウキョウイ",
+                                                   phonetic_runs=((0, 0, 2), (3, 3, 2), (8, 6, 1)))])
+        book = XLSB.Workbook(data)
+        self.assertEqual(book.cells[("1", "A1")], OOXML.Cell("string", "今日は東京へ行く"))
+        self.assertIsNone(book.unsupported_reason(("1", "A1")))
+        self.assertEqual(book.cells[("1", "B1")], OOXML.Cell("string", "東京と大阪"))
+        self.assertEqual(book.unsupported_reason(("1", "B1")), "リッチテキスト")
+
     def test_cells_use_shared_contract_and_decimal_number_normalization(self):
         data = minimal([row_header(0, spans=((0, 5),)), cell(0, "rk", (12 << 2) | 2),
                         cell(1, "number", 0.1), cell(2, "number", -0.0),

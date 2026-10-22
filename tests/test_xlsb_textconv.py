@@ -12,7 +12,7 @@ from unittest import mock
 import zipfile
 
 import test_excel_textconv as textconv_tests
-from xlsb_builder import cell, formula_range, package, parsed_formula, ptg_exp, ptg_int, ptg_ref, record, replace_part, rich_string, row_header, wide, worksheet
+from xlsb_builder import cell, formula_range, package, parsed_formula, ptg_exp, ptg_int, ptg_ref, record, records, replace_part, rich_string, row_header, wide, worksheet
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,14 +85,15 @@ class BinaryRecordTests(unittest.TestCase):
 
 class BinaryWorkbookTests(unittest.TestCase):
     def test_excel_generated_fixtures_match_xlsx_byte_for_byte(self):
-        for name in ("sales", "sales-edited"):
+        for name in ("sales", "sales-edited", "phonetic", "phonetic-edited"):
             with self.subTest(name=name):
                 data = (FIXTURES / (name + ".xlsb")).read_bytes()
                 self.assertTrue(xlsb.is_xlsb(data))
                 expected = textconv.convert((FIXTURES / (name + ".xlsx")).read_bytes())
                 self.assertEqual(xlsb.render_text(data), expected)
                 self.assertEqual(textconv.convert(data), expected)
-                self.assertEqual(xlsb.sheet_titles(data), ["売上", "備考"])
+                titles = ["ふりがな"] if name.startswith("phonetic") else ["売上", "備考"]
+                self.assertEqual(xlsb.sheet_titles(data), titles)
         book = xlsb.read_workbook((FIXTURES / "sales.xlsb").read_bytes())
         cells = {cell.coordinate: cell for cell in book.sheets[0].cells}
         self.assertTrue(cells["E2"].rich)
@@ -100,6 +101,24 @@ class BinaryWorkbookTests(unittest.TestCase):
         self.assertEqual(cells["E3"].value, "売上")
         self.assertEqual([(name.name, name.scope) for name in book.names], [("_xlfn.IFERROR", 0xFFFFFFFF), ("税率", 0xFFFFFFFF)])
         self.assertEqual(len(book.sheets[0].merges), 1)
+
+    def test_phonetic_fixture_contains_multiple_and_implicit_runs(self):
+        with zipfile.ZipFile(FIXTURES / "phonetic.xlsb") as archive:
+            strings = archive.read("xl/sharedStrings.bin")
+        counts = []
+        for kind, payload, start, end in records(strings):
+            if kind != 19 or not payload[0] & 2:
+                continue
+            position = 1
+            position += 4 + struct.unpack_from("<I", payload, position)[0] * 2
+            if payload[0] & 1:
+                position += 4 + struct.unpack_from("<I", payload, position)[0] * 4
+            position += 4 + struct.unpack_from("<I", payload, position)[0] * 2
+            count = struct.unpack_from("<I", payload, position)[0]
+            self.assertEqual(len(payload) - position - 4, count * 6 + 4)
+            counts.append(count)
+        self.assertIn(0, counts)
+        self.assertTrue(any(count >= 2 for count in counts))
 
     def test_many_rows_and_columns_are_in_coordinate_order(self):
         text = xlsb.render_text((FIXTURES / "many-rows.xlsb").read_bytes())
@@ -121,6 +140,70 @@ class BinaryWorkbookTests(unittest.TestCase):
         cells = xlsb.read_workbook(data).sheets[0].cells
         self.assertTrue(cells[7].rich)
         self.assertFalse(cells[8].rich)
+
+    def test_excel_phonetic_runs_match_payloads_and_are_ignored(self):
+        shared = rich_string("今日は東京へ行く", phonetic="キョウトウキョウイ",
+                             phonetic_runs=((0, 0, 2), (3, 3, 2), (8, 6, 1)))
+        inline = rich_string("第1回東京会議の議事録", runs=((3, 2), (5, 0)),
+                             phonetic="ダイカイトウキョウカイギギジロク",
+                             phonetic_runs=((0, 0, 1), (2, 2, 1), (4, 3, 2), (9, 5, 2), (12, 8, 3)))
+        plain_inline = rich_string("東京と大阪", phonetic="トウキョウオオサカ",
+                                   phonetic_runs=((0, 0, 2), (5, 3, 2)))
+        self.assertEqual(shared, bytes.fromhex(
+            "0208000000ca4ee5656f307167ac4e78304c884f3009000000ad30e730a630c830a630ad30e730a630a430"
+            "0300000000000000020003000300020008000600010001003500"))
+        self.assertEqual(inline, bytes.fromhex(
+            "030b0000002c7b3100de567167ac4e1a4f708b6e30708b8b4e3293020000000300020005000000"
+            "10000000c030a430ab30a430c830a630ad30e730a630ab30a430ae30ae30b830ed30af30"
+            "050000000000000001000200020001000400030002000900050002000c000800030001003500"))
+        data = package([("ふりがな", worksheet([
+            row_header(0), cell(0, "shared-string", 0), cell(1, "rich-string", inline),
+            cell(2, "rich-string", plain_inline),
+        ]))], shared_strings=[shared])
+        expected = ('Sheet: "ふりがな"\nA1\t"今日は東京へ行く"\n'
+                    'B1\t"第1回東京会議の議事録"\nC1\t"東京と大阪"\n')
+        self.assertEqual(xlsb.render_text(data), expected)
+        self.assertEqual(textconv.convert(data), expected)
+        for book in (xlsb.read_workbook(data), xlsb.BinaryWorkbook(data, compact=True)):
+            with self.subTest(compact=isinstance(book.sheets[0].cells, xlsb._CellSequence)):
+                values = [(item.value, item.rich) for item in book.sheets[0].cells]
+                self.assertEqual(values, [("今日は東京へ行く", False), ("第1回東京会議の議事録", True),
+                                          ("東京と大阪", False)])
+
+    def test_specification_phonetic_runs_without_trailing_settings_are_read(self):
+        for runs in ((), ((0, 0, 2, 1, 0x35), (5, 3, 2, 1, 0x35))):
+            with self.subTest(runs=runs):
+                payload = b"\x02" + wide("東京と大阪") + wide("トウキョウオオサカ")
+                payload += struct.pack("<I", len(runs))
+                payload += b"".join(struct.pack("<HHHHI", *run) for run in runs)
+                data = package([("ふりがな", worksheet([
+                    row_header(0), cell(0, "shared-string", 0), cell(1, "rich-string", payload),
+                ]))], shared_strings=[payload])
+                expected = 'Sheet: "ふりがな"\nA1\t"東京と大阪"\nB1\t"東京と大阪"\n'
+                self.assertEqual(xlsb.render_text(data), expected)
+                self.assertEqual(textconv.convert(data), expected)
+                for book in (xlsb.read_workbook(data), xlsb.BinaryWorkbook(data, compact=True)):
+                    self.assertEqual([(item.value, item.rich) for item in book.sheets[0].cells],
+                                     [("東京と大阪", False), ("東京と大阪", False)])
+
+    def test_malformed_phonetic_run_lengths_fail_with_phonetic_message(self):
+        payload = rich_string("東京と大阪", phonetic="トウキョウオオサカ",
+                              phonetic_runs=((0, 0, 2), (5, 3, 2)))
+        count_position = 1 + len(wide("東京と大阪")) + len(wide("トウキョウオオサカ"))
+        too_many = payload[:count_position] + struct.pack("<I", 3) + payload[count_position + 4:]
+        runs = ((0, 0, 2, 1, 0x35), (5, 3, 2, 1, 0x35))
+        specification = b"\x02" + wide("東京と大阪") + wide("トウキョウオオサカ") + struct.pack("<I", len(runs))
+        specification += b"".join(struct.pack("<HHHHI", *run) for run in runs)
+        for damaged in (too_many, payload[:-4], payload + b"\0", specification + b"\0", specification[:-1]):
+            for kind in ("shared-string", "rich-string"):
+                with self.subTest(payload=damaged, kind=kind):
+                    data = package([("ふりがな", worksheet([
+                        row_header(0), cell(0, kind, 0 if kind == "shared-string" else damaged),
+                    ]))], shared_strings=[damaged] if kind == "shared-string" else [])
+                    for read in (xlsb.render_text, xlsb.read_workbook, textconv.convert,
+                                 lambda value: xlsb.BinaryWorkbook(value, compact=True)):
+                        with self.assertRaisesRegex(xlsb.WorkbookError, "ふりがな"):
+                            read(data)
 
     def test_dates_times_durations_and_1904_epoch_match_openpyxl(self):
         sheet = worksheet([row_header(0), cell(0, "number", 1, ixfe=1), cell(1, "number", 0.5, ixfe=2), cell(2, "number", 1.5, ixfe=3), cell(3, "number", 1, ixfe=0)])

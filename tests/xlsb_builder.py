@@ -85,13 +85,16 @@ def formula_range(bounds, rgce, rgcb=b"", *, array=False):
     return record(426 if array else 427, struct.pack("<IIII", *bounds) + (b"\0" if array else b"") + parsed_formula(rgce, rgcb))
 
 
-def rich_string(value, *, runs=(), phonetic=None):
+def rich_string(value, *, runs=(), phonetic=None, phonetic_runs=(),
+                phonetic_font=1, phonetic_flags=0x0035):
     flags = bool(runs) | (2 if phonetic is not None else 0)
     payload = bytes([flags]) + wide(value)
     if runs:
         payload += struct.pack("<I", len(runs)) + b"".join(struct.pack("<HH", *run) for run in runs)
     if phonetic is not None:
-        payload += wide(phonetic) + struct.pack("<I", 0)
+        payload += wide(phonetic) + struct.pack("<I", len(phonetic_runs))
+        payload += b"".join(struct.pack("<HHH", *run) for run in phonetic_runs)
+        payload += struct.pack("<HH", phonetic_font, phonetic_flags)
     return payload
 
 

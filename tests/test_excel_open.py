@@ -116,7 +116,8 @@ class ExcelOpenTests(unittest.TestCase):
     maxDiff = None
 
     def test_reader_values_and_formulas_match_excel(self):
-        names = ("sales.xlsb", "sales-edited.xlsb", "many-rows.xlsb")
+        names = ("sales.xlsb", "sales-edited.xlsb", "many-rows.xlsb",
+                 "phonetic.xlsb", "phonetic-edited.xlsb")
         view = excel_view([FIXTURES / name for name in names])
         for name in names:
             with self.subTest(name=name):
@@ -166,6 +167,30 @@ class ExcelOpenTests(unittest.TestCase):
                     origin = source_view if (ids[sheet], coordinate) in styles else target_view
                     self.assertEqual(entry["sheets"][sheet][coordinate]["format"],
                                      origin[sheet][coordinate]["format"], item)
+
+    def test_rebuilt_phonetic_xlsb_opens_in_excel_with_only_selected_cells_changed(self):
+        import excel_stage_xlsb
+
+        target_data = (FIXTURES / "phonetic.xlsb").read_bytes()
+        source_data = (FIXTURES / "phonetic-edited.xlsb").read_bytes()
+        target, source = excel_stage_xlsb.Workbook(target_data), excel_stage_xlsb.Workbook(source_data)
+        names = {sheet.id: sheet.name for sheet in target.sheets}
+        sheet_id = next(sheet.id for sheet in target.sheets if sheet.name == "ふりがな")
+        selected = {key for key in set(target.cells) | set(source.cells)
+                    if target.cells.get(key) != source.cells.get(key)
+                    and not target.unsupported_reason(key) and not source.unsupported_reason(key)}
+        self.assertEqual(selected, {(sheet_id, coordinate) for coordinate in ("A2", "B1", "A8")})
+        with tempfile.TemporaryDirectory(dir=os.environ.get("EXCEL_OPEN_TEMP")) as directory:
+            path = Path(directory) / "phonetic-rebuilt.xlsb"
+            path.write_bytes(target.rebuild(source, selected))
+            view = excel_view([path])
+        entry = view["phonetic-rebuilt.xlsb"]
+        self.assertTrue(entry["ok"], entry.get("error"))
+        self.assertNotIn("修復", entry.get("caption", ""))
+        self.assertNotIn("Repaired", entry.get("caption", ""))
+        before, after = reader_cells(target_data), reader_cells(source_data)
+        expected = expected_cells(before, after, selected, names)
+        self.assertEqual(constants_and_formulas(excel_cells(entry)), constants_and_formulas(expected))
 
     def test_imported_formats_look_the_same_in_excel(self):
         import excel_stage_xlsb
