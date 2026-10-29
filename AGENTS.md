@@ -6,7 +6,7 @@
 
 ## 導入手順の正本
 
-導入・更新・使い方の手順は、setup-notes の [almalinux-setup.md](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff) と [windows-setup.md](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff) の「excel-diff」とその子の項にある。このリポジトリには置かない。ロールバックと macOS の導入は、このリポジトリに置く。
+導入・更新・使い方の手順は、setup-notes の [almalinux-setup.md](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff) と [windows-setup.md](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff) の「excel-diff」とその子の項にある。このリポジトリには置かない。macOS の導入は、このリポジトリに置く。
 
 ## このリポジトリは何か
 
@@ -59,7 +59,7 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 - `CLAUDE.md` — Claude Code から AGENTS.md を読むための指定
 - `.gitignore` — Python の実行時キャッシュとローカルの設定・同期マーカーを除く
 - `docs/reference/readme.md` — Excel・Word の差分表示・取り込みと Word の部分ステージの仕様、自動検証・macOS の導入
-- `docs/extra/readme.md` — Excel・Word の注意点とロールバック
+- `docs/extra/readme.md` — Excel・Word の注意点
 
 ## テスト
 
@@ -73,7 +73,7 @@ python3 -B -m unittest discover -s tests -v
 ## 文書の置き場所
 
 - 導入・利用・更新の手順は正本に置き、README の「導入」の表から正本の項へ直接リンクする（手順書の先頭やカテゴリの見出しへはリンクしない）。執筆規則は setup-notes の `docs/dev/writing-rules.md`
-- `docs/extra/` はロールバックと注意点、`docs/reference/` は仕様・自動検証・macOS の導入。検証記録（実施日・環境・結果・未確認事項）は非公開の `ryo-aoki-pc/setup-notes-verification` の `repos/excel-diff/docs/verification/` に置く。テストのコマンドは上の「テスト」
+- `docs/extra/` は注意点。ロールバック（取り消し）の手順は書かない。`docs/reference/` は仕様・自動検証・macOS の導入。検証記録（実施日・環境・結果・未確認事項）は非公開の `ryo-aoki-pc/setup-notes-verification` の `repos/excel-diff/docs/verification/` に置く。テストのコマンドは上の「テスト」
 - 検証記録を書く・直すときは、`setup-notes-verification` を clone し、そちらへ Pull Request を作る
 - 文書を移す・分ける・まとめるときは、移した経緯と、旧ファイル名・旧見出しとの対応を文書に書かない（経緯は git の履歴と Pull Request の本文に残す）。リンクを今の場所へ直す。中身が新しい場所への案内だけになったファイルは消す
 - 検証していないことを「動く」と書かない

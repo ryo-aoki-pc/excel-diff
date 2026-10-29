@@ -18,7 +18,6 @@ AlmaLinux 10 と Windows 11 の自分のユーザーを対象にしています�
 | 差分を確かめる（Word） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-word-の差分を確かめる) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-word-の差分を確かめる) |
 | 部分ステージ（Word） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-word-の変更を部分ステージする) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-word-の変更を部分ステージする) |
 | 2 つの文書の取り込み（Word） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-2-つの-word-の変更を取り込む) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#winmerge-で-2-つの-word-の変更を取り込む) |
-| 戻す | [手順](docs/extra/readme.md#almalinux-10-のロールバック) | [手順](docs/extra/readme.md#windows-11-のロールバック) |
 
 ## 2 つのブックのセルを取り込む
 
@@ -116,6 +115,6 @@ lazygit では、変更した文書を選ぶと、段落の差分が delta の�
 ## 文書
 
 - [仕様と検査](docs/reference/readme.md) — Excel・Word の表示内容・部分ステージと取り込みの仕様・自動検証・macOS の導入
-- [注意点とロールバック](docs/extra/readme.md) — Excel・Word の対応条件と制限・取り込みの注意点・戻す手順
+- [注意点](docs/extra/readme.md) — Excel・Word の対応条件と制限・取り込みの注意点
 - [検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)（非公開） — 実施日・環境・結果・未確認の範囲
 - [AGENTS.md](AGENTS.md) — テストのコマンドと、変えるときの決まり
