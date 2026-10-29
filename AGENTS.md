@@ -108,4 +108,4 @@ python3 -B -m unittest discover -s tests -v
 - Claude Code から頼まれたエージェントは、上の自分の役割の範囲で作業する
 - レビューの指摘は、実物で確かめてから採る。採らなかった指摘は、理由を付けて報告する
 - 使えないエージェント（入っていない・ログインが切れた）は飛ばし、そのことを報告する
-- 頼み方は、[setup-notes](https://github.com/ryo-aoki-pc/setup-notes) の `docs/ai-agents.md` の「コーディングエージェントの共同作業: Windows 11 で既定で分担する」と、`docs/reference/coding-agents.md` の「既定の分担」
+- 頼み方は、Forgejo の非公開リポジトリ `setup-notes-private` の `docs/ai-agents.md` の「コーディングエージェントの共同作業: Windows 11 で既定で分担する」と、`docs/reference/coding-agents.md` の「既定の分担」
