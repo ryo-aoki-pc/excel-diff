@@ -116,5 +116,5 @@ lazygit では、変更した文書を選ぶと、段落の差分が delta の�
 
 - [仕様と検査](docs/reference/readme.md) — Excel・Word の表示内容・部分ステージと取り込みの仕様・自動検証・macOS の導入
 - [注意点](docs/extra/readme.md) — Excel・Word の対応条件と制限・取り込みの注意点
-- [検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)（非公開） — 実施日・環境・結果・未確認の範囲
+- 検証記録（`repos/excel-diff/docs/verification/readme.md`、非公開） — 実施日・環境・結果・未確認の範囲
 - [AGENTS.md](AGENTS.md) — テストのコマンドと、変えるときの決まり

@@ -1,6 +1,6 @@
 # excel-diff の注意点
 
-[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・[検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md)・[表示する内容と自動検証](../reference/readme.md)
+[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・検証記録・[表示する内容と自動検証](../reference/readme.md)
 
 ## 注意点
 
@@ -50,7 +50,7 @@ xlsb は、共有文字列表を参照するセルの値を選ぶと、セルの
 - 拡張機能を持つ xf、不正な書式番号、定義の無い表示形式、コピーが必要な定義の拡張の名前空間、異なるパレットの色、同名で中身の違うスタイルなど、対応できない書式を選んだ場合。書式の部品の欠落や書式の上限を超える場合も止まります。詳しくは[2 つのブックの取り込み](../reference/readme.md#2-つのブックの取り込み)を参照してください
 - 値・数式の置換や書式の変更で、削除行と追加行の片側だけを選択した場合。対応する両方の行を選択してください
 
-画面を開いた後に対象 Excel の index や作業ファイルが変わった場合も、古い選択を適用せず止まります。閉じて `E` から開き直してください。他ファイルのステージ変更は保持します。ブックを読み取って差分を作る処理は完了まで待つため、大きいブックでは専用画面が開くまで時間がかかります。その間は端末に「Excel を読み込んでいます」と表示します。Windows 11 で計測用のスクリプトから直接呼んだ例では、50 万セルのブックで、選択画面を作るまでの準備に 12〜13 秒、全部のハンクを選んだ反映に 17〜19 秒ほどかかり、メモリは最大で 0.9 GB ほど使いました。全部のセルに書式が付いたブックでは、反映が約 17 秒、メモリが最大 1.1 GB ほどで、書式を比べない版より反映が 2 秒ほど長くかかりました([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#excel-のセルの書式の違いの部分ステージと取り込み2026-10-20))。50 万セルの xlsb（離れた 10 セルの値と 10 セルの書式を変えたもの）では、準備が約 14 秒、反映が約 18 秒、メモリは最大で 0.5 GB ほどで、同じ内容の xlsx と同じか短い時間でした([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#xlsbxlam-の部分ステージと取り込みxls-の数式の表示2026-10-22))。
+画面を開いた後に対象 Excel の index や作業ファイルが変わった場合も、古い選択を適用せず止まります。閉じて `E` から開き直してください。他ファイルのステージ変更は保持します。ブックを読み取って差分を作る処理は完了まで待つため、大きいブックでは専用画面が開くまで時間がかかります。その間は端末に「Excel を読み込んでいます」と表示します。Windows 11 で計測用のスクリプトから直接呼んだ例では、50 万セルのブックで、選択画面を作るまでの準備に 12〜13 秒、全部のハンクを選んだ反映に 17〜19 秒ほどかかり、メモリは最大で 0.9 GB ほど使いました。全部のセルに書式が付いたブックでは、反映が約 17 秒、メモリが最大 1.1 GB ほどで、書式を比べない版より反映が 2 秒ほど長くかかりました(検証記録: `repos/excel-diff/docs/verification/readme.md` の「Excel のセルの書式の違いの部分ステージと取り込み（2026-10-20）」)。50 万セルの xlsb（離れた 10 セルの値と 10 セルの書式を変えたもの）では、準備が約 14 秒、反映が約 18 秒、メモリは最大で 0.5 GB ほどで、同じ内容の xlsx と同じか短い時間でした(検証記録: `repos/excel-diff/docs/verification/readme.md` の「xlsb・xlam の部分ステージと取り込み、xls の数式の表示（2026-10-22）」)。
 
 表示確認と部分ステージのために使うスクリプトは、Excel のマクロを実行せず、外部リンクの更新や数式の再計算も行いません。値・数式を部分ステージしたブックには、次に Excel で開いたときに一度だけ再計算する指定(`fullCalcOnLoad`)を付けます。書式だけを選んだ場合は、この指定を追加しません。常に完全再計算する設定(`forceFullCalc`)は付けません。
 
@@ -75,7 +75,7 @@ WinMerge では、取り込むセルの行を右から左へ行ごとにコピ�
 
 WinMerge の比較設定によっては、違いが画面に出ないことがあります。比較の無視設定やフィルターを確かめてください。WinMerge のバックアップ設定によっては、一時フォルダー以外にもセルの値を含むテキストの控えが残ることがあります。扱う値に応じて保存先を確かめてください。
 
-取り込みの準備と書き込みは、ブック全体の読み込み・検証が終わるまで待ちます。大きいブックでは時間とメモリが必要です。Windows 11 で計測用のスクリプトから直接呼んだ例では、50 万セルのブックで、画面を開くまでの準備に約 13 秒、書き込みに 16〜19 秒ほどかかりました。全部のセルに書式が付いたブックでは、準備が約 16 秒、書き込みが約 20 秒で、書式を比べない版より 4〜5 秒長くかかりました([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#excel-のセルの書式の違いの部分ステージと取り込み2026-10-20))。50 万セルの xlsb では、準備が約 15 秒、書き込みが約 18 秒でした([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#xlsbxlam-の部分ステージと取り込みxls-の数式の表示2026-10-22))。WinMerge は約 1 秒で窓を開き、208 MB ほど使いました([検証記録](https://github.com/ryo-aoki-pc/setup-notes-verification/blob/main/repos/excel-diff/docs/verification/readme.md#2-つのブックの取り込み2026-10-18))。
+取り込みの準備と書き込みは、ブック全体の読み込み・検証が終わるまで待ちます。大きいブックでは時間とメモリが必要です。Windows 11 で計測用のスクリプトから直接呼んだ例では、50 万セルのブックで、画面を開くまでの準備に約 13 秒、書き込みに 16〜19 秒ほどかかりました。全部のセルに書式が付いたブックでは、準備が約 16 秒、書き込みが約 20 秒で、書式を比べない版より 4〜5 秒長くかかりました(検証記録: `repos/excel-diff/docs/verification/readme.md` の「Excel のセルの書式の違いの部分ステージと取り込み（2026-10-20）」)。50 万セルの xlsb では、準備が約 15 秒、書き込みが約 18 秒でした(検証記録: `repos/excel-diff/docs/verification/readme.md` の「xlsb・xlam の部分ステージと取り込み、xls の数式の表示（2026-10-22）」)。WinMerge は約 1 秒で窓を開き、208 MB ほど使いました(検証記録: `repos/excel-diff/docs/verification/readme.md` の「2 つのブックの取り込み（2026-10-18）」)。
 
 ファイルは同じフォルダーの一時ファイルから置き換えます。元のモードと、Windows の `Zone.Identifier` は引き継ぎます。Windows の明示的な ACL、`Zone.Identifier` 以外の代替データストリームは引き継ぎません。
 
