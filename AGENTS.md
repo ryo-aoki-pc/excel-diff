@@ -4,11 +4,11 @@
 
 ## 導入手順の正本
 
-導入・更新・使い方の手順は、setup-notes の [almalinux-setup.md](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff) と [windows-setup.md](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff) の「excel-diff」とその子の項にある。このリポジトリには置かない。macOS の導入は、このリポジトリに置く。
+AlmaLinux 10・Windows 11 の導入・更新の手順は [docs/install.md](docs/install.md)、使い方の手順は [docs/usage.md](docs/usage.md) にある。macOS の導入は [docs/reference/readme.md](docs/reference/readme.md) に置く。setup-notes の手順書には項を置かず、「Git と開発の道具」のリードと「更新」から、これらの項へ案内している。項の見出しを変えたら、そこへのリンク（setup-notes の手順書と README、lazygit の README、setup-notes-verification の検証記録）も直す。
 
 ## このリポジトリは何か
 
-Excel のブックと Word の文書を、セル・段落の単位のテキストにして Git の差分に表示し、選んだ変更だけを部分ステージする道具。任意の 2 つのブック・文書を比べ、WinMerge または lazygit で選んだ変更を一方へ取り込むこともできる。導入の表は [README.md](README.md)、仕様と検査・macOS の導入は [docs/reference/readme.md](docs/reference/readme.md)、注意点は [docs/extra/readme.md](docs/extra/readme.md)、検証記録は `repos/excel-diff/docs/verification/readme.md`。
+Excel のブックと Word の文書を、セル・段落の単位のテキストにして Git の差分に表示し、選んだ変更だけを部分ステージする道具。任意の 2 つのブック・文書を比べ、WinMerge または lazygit で選んだ変更を一方へ取り込むこともできる。導入の表は [README.md](README.md)、導入と更新の手順は [docs/install.md](docs/install.md)、使い方の手順は [docs/usage.md](docs/usage.md)、仕様と検査・macOS の導入は [docs/reference/readme.md](docs/reference/readme.md)、注意点は [docs/extra/readme.md](docs/extra/readme.md)、検証記録は `repos/excel-diff/docs/verification/readme.md`。
 
 lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygit) にあり、`E` のキーが、このリポジトリの導入スクリプトで登録する `git excel-stage` を呼ぶ。
 
@@ -56,6 +56,8 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 - `AGENTS.md` — コーディングエージェントの作業規則
 - `CLAUDE.md` — Claude Code から AGENTS.md を読むための指定
 - `.gitignore` — Python の実行時キャッシュとローカルの設定・同期マーカーを除く
+- `docs/install.md` — AlmaLinux 10・Windows 11 の導入・更新の手順
+- `docs/usage.md` — AlmaLinux 10・Windows 11 の差分の確認・部分ステージ・2 つのファイルの取り込みの手順
 - `docs/reference/readme.md` — Excel・Word の差分表示・取り込みと Word の部分ステージの仕様、自動検証・macOS の導入
 - `docs/extra/readme.md` — Excel・Word の注意点
 
@@ -70,7 +72,7 @@ python3 -B -m unittest discover -s tests -v
 
 ## 文書の置き場所
 
-- 導入・利用・更新の手順は正本に置き、README の「導入」の表から正本の項へ直接リンクする（手順書の先頭やカテゴリの見出しへはリンクしない）。執筆規則は setup-notes の `docs/dev/writing-rules.md`
+- 導入・更新の手順は `docs/install.md`、使い方の手順は `docs/usage.md` に置き、README の「導入」の表からその項へ直接リンクする（文書の先頭へはリンクしない）。執筆規則は setup-notes の `docs/dev/writing-rules.md`
 - `docs/extra/` は注意点。ロールバック（取り消し）の手順は書かない。`docs/reference/` は仕様・自動検証・macOS の導入。検証記録（実施日・環境・結果・未確認事項）は Forgejo の非公開リポジトリ `setup-notes-verification` の `repos/excel-diff/docs/verification/` に置く。テストのコマンドは上の「テスト」
 - 検証記録を書く・直すときは、Forgejo の非公開リポジトリ `setup-notes-verification` を clone し、そちらへ Pull Request を作る。このリポジトリから検証記録へは URL で指さず、「`<検証記録のパス>` の「<見出し>」」と文字で書く（見出しを指さないときは、同じ名前の文書の記録なら「検証記録」とだけ書き、ほかの記録はパスを添える）
 - 文書を移す・分ける・まとめるときは、移した経緯と、旧ファイル名・旧見出しとの対応を文書に書かない（経緯は git の履歴と Pull Request の本文に残す）。リンクを今の場所へ直す。中身が新しい場所への案内だけになったファイルは消す

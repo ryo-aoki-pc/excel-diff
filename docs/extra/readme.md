@@ -1,6 +1,6 @@
 # excel-diff の注意点
 
-[手順書（AlmaLinux 10）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)・[手順書（Windows 11）](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)・検証記録・[表示する内容と自動検証](../reference/readme.md)
+[導入と更新](../install.md)・[使い方](../usage.md)・検証記録・[表示する内容と自動検証](../reference/readme.md)
 
 ## 注意点
 
@@ -22,11 +22,11 @@ Windows の lazygit 0.66.0 は、別のファイルへ移っても実行中の�
 - 変換結果はブックの内容(SHA-256)ごとにキャッシュし、同じ内容は 2 回目から変換しない。キャッシュは合計 512 MB を超えた分と、30 日使わなかった分から消える。導入スクリプトを再実行すると、古い版の変換スクリプトのキャッシュも消す
 - Git の変換キャッシュ(`diff.excel.cachetextconv`)は仮の内容まで保存してしまうため使わない
 
-待つ時間は環境変数 `EXCEL_TEXTCONV_TIMEOUT`(秒)で変えられます。`0` にすると変換が終わるまで待ちます。設定する操作は [AlmaLinux 10](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で大きな-excel-の変換を待つ) / [Windows 11](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で大きな-excel-の変換を待つ) を参照してください。
+待つ時間は環境変数 `EXCEL_TEXTCONV_TIMEOUT`(秒)で変えられます。`0` にすると変換が終わるまで待ちます。設定する操作は [AlmaLinux 10](../usage.md#lazygit-で大きな-excel-の変換を待つ) / [Windows 11](../usage.md#windows-11-の-lazygit-で大きな-excel-の変換を待つ) を参照してください。
 
 PowerShell の設定は、そのウィンドウで後から実行するコマンドにも効きます。元に戻すときは `Remove-Item Env:EXCEL_TEXTCONV_TIMEOUT` を実行します。
 
-部分ステージの操作と端末から直接開く方法は [AlmaLinux 10](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-excel-のセル変更を部分ステージする) / [Windows 11](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-excel-のセル変更を部分ステージする) にあります。
+部分ステージの操作と端末から直接開く方法は [AlmaLinux 10](../usage.md#lazygit-で-excel-のセル変更を部分ステージする) / [Windows 11](../usage.md#windows-11-の-lazygit-で-excel-のセル変更を部分ステージする) にあります。
 対象は HEAD と index の両方に既存の Excel があるファイルです。すでにステージ済みの変更がある場合は、その版を基準に、残りのセル変更を追加できます。新規ファイルは一度全体をコミットしてから部分ステージの対象になります。作業中の Excel は書き換えません。ファイル全体をステージする場合は、元の lazygit のファイル一覧で `Space` を使ってください。
 
 専用画面ではセルの値・通常の数式と、セルの書式を比較します。値と書式は別々に選べ、選ばなかった書式・画像・マクロ・テンプレート形式は index のものを保持します。数式の計算結果キャッシュは選択対象にしません。値・数式は `.cells.txt`、書式は `.formats.txt` に分けて表示します。

@@ -6,18 +6,18 @@ lazygit の設定は [ryo-aoki-pc/lazygit](https://github.com/ryo-aoki-pc/lazygi
 
 ## 導入
 
-AlmaLinux 10 と Windows 11 の自分のユーザーを対象にしています。導入・更新と使い方は、setup-notes の次の項を参照してください。macOS は[仕様と検査の「macOS の導入」](docs/reference/readme.md#macos-の導入)にあります。
+AlmaLinux 10 と Windows 11 の自分のユーザーを対象にしています。導入・更新は[導入と更新](docs/install.md)、使い方は[使い方](docs/usage.md)の次の項を参照してください。macOS は[仕様と検査の「macOS の導入」](docs/reference/readme.md#macos-の導入)にあります。
 
 | 用途 | AlmaLinux 10 | Windows 11 |
 | --- | --- | --- |
-| 導入・更新 | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する) |
-| 差分を確かめる（Excel） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-excel-の差分を確かめる) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-excel-の差分を確かめる) |
-| 部分ステージ（Excel） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-excel-のセル変更を部分ステージする) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-excel-のセル変更を部分ステージする) |
-| 2 つのブックの取り込み（Excel） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-2-つの-excel-のセルの変更を取り込む) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#winmerge-で-2-つの-excel-のセルの変更を取り込む) |
-| 大きいブックの変換を待つ（Excel） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で大きな-excel-の変換を待つ) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で大きな-excel-の変換を待つ) |
-| 差分を確かめる（Word） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-word-の差分を確かめる) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-word-の差分を確かめる) |
-| 部分ステージ（Word） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-word-の変更を部分ステージする) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#lazygit-で-word-の変更を部分ステージする) |
-| 2 つの文書の取り込み（Word） | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#lazygit-で-2-つの-word-の変更を取り込む) | [手順](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#winmerge-で-2-つの-word-の変更を取り込む) |
+| 導入・更新 | [手順](docs/install.md#excel-diff-を導入更新する) | [手順](docs/install.md#windows-11-で-excel-diff-を導入更新する) |
+| 差分を確かめる（Excel） | [手順](docs/usage.md#lazygit-で-excel-の差分を確かめる) | [手順](docs/usage.md#windows-11-の-lazygit-で-excel-の差分を確かめる) |
+| 部分ステージ（Excel） | [手順](docs/usage.md#lazygit-で-excel-のセル変更を部分ステージする) | [手順](docs/usage.md#windows-11-の-lazygit-で-excel-のセル変更を部分ステージする) |
+| 2 つのブックの取り込み（Excel） | [手順](docs/usage.md#lazygit-で-2-つの-excel-のセルの変更を取り込む) | [手順](docs/usage.md#winmerge-で-2-つの-excel-のセルの変更を取り込む) |
+| 大きいブックの変換を待つ（Excel） | [手順](docs/usage.md#lazygit-で大きな-excel-の変換を待つ) | [手順](docs/usage.md#windows-11-の-lazygit-で大きな-excel-の変換を待つ) |
+| 差分を確かめる（Word） | [手順](docs/usage.md#lazygit-で-word-の差分を確かめる) | [手順](docs/usage.md#windows-11-の-lazygit-で-word-の差分を確かめる) |
+| 部分ステージ（Word） | [手順](docs/usage.md#lazygit-で-word-の変更を部分ステージする) | [手順](docs/usage.md#windows-11-の-lazygit-で-word-の変更を部分ステージする) |
+| 2 つの文書の取り込み（Word） | [手順](docs/usage.md#lazygit-で-2-つの-word-の変更を取り込む) | [手順](docs/usage.md#winmerge-で-2-つの-word-の変更を取り込む) |
 
 ## 2 つのブックのセルを取り込む
 
@@ -114,6 +114,8 @@ lazygit では、変更した文書を選ぶと、段落の差分が delta の�
 
 ## 文書
 
+- [導入と更新](docs/install.md) — AlmaLinux 10・Windows 11 の導入・更新の手順
+- [使い方](docs/usage.md) — 差分の確認・部分ステージ・取り込みの手順
 - [仕様と検査](docs/reference/readme.md) — Excel・Word の表示内容・部分ステージと取り込みの仕様・自動検証・macOS の導入
 - [注意点](docs/extra/readme.md) — Excel・Word の対応条件と制限・取り込みの注意点
 - 検証記録（`repos/excel-diff/docs/verification/readme.md`、非公開） — 実施日・環境・結果・未確認の範囲
