@@ -1,6 +1,6 @@
 # Excel・Word の差分表示の仕様と検査
 
-導入と使い方の手順は setup-notes の[excel-diff を導入・更新する](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/almalinux-setup.md#excel-diff-を導入更新する)（Windows 11 は[同名の項](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#excel-diff-を導入更新する)）と、その後ろの項にある。この文書には、Excel・Word の表示する内容・取り込みと Word の部分ステージの仕様・自動検証・macOS の導入を置く。対応条件と制限は[注意点](../extra/readme.md)。
+導入と更新の手順は[導入と更新](../install.md)、使い方の手順は[使い方](../usage.md)にある。この文書には、Excel・Word の表示する内容・取り込みと Word の部分ステージの仕様・自動検証・macOS の導入を置く。対応条件と制限は[注意点](../extra/readme.md)。
 
 ## 表示する内容
 
