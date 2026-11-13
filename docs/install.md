@@ -84,7 +84,7 @@
 ### Windows 11 で excel-diff を導入・更新する
 
 - Excel のブックと Word の文書の差分をテキストで出す textconv と、`git excel-stage`・`git excel-merge`・`git word-stage`・`git word-merge` を Git 全体に入れ、導入状態を確かめる
-- 前提: [Git for Windows](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#git-for-windows)と[アプリを入れる](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#アプリを入れる)の手順 2・3 を通してある。部分ステージと lazygit での取り込みには lazygit 0.66.0 以上・delta 0.20.1 以上が要る
+- 前提: [Git for Windows](https://gitforwindows.org/)と[scoop](https://scoop.sh/)が入っている。部分ステージと lazygit での取り込みには lazygit 0.66.0 以上・delta 0.20.1 以上が要る
 - 実行場所: この PC のデスクトップの管理者ではない PowerShell 7。この項の手順 1 で開く
 - Python 3.9 以上が要る。この項の手順 2 で、無ければ scoop で入れる
 - WinMerge での取り込みには WinMerge が要る。[WinMerge で 2 つの Excel のセルの変更を取り込む](usage.md#winmerge-で-2-つの-excel-のセルの変更を取り込む)の手順 2 か、[WinMerge で 2 つの Word の変更を取り込む](usage.md#winmerge-で-2-つの-word-の変更を取り込む)の手順 3 で、無ければ入れる
@@ -93,7 +93,7 @@
 1. 管理者ではない PowerShell 7 を開く。
 
    - スタートメニューで「PowerShell」を探し、クリックして開く（「Windows PowerShell」ではない。「管理者として実行」にはしない）
-   - 「PowerShell」が無ければ、[アプリを入れる](https://github.com/ryo-aoki-pc/setup-notes/blob/main/docs/windows-setup.md#アプリを入れる)の手順 6〜9 を通す
+   - 「PowerShell」が無ければ、[PowerShell 7](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows)を入れる
 
 1. Python が無ければ scoop で入れ、版を確かめる。
 
